@@ -84,7 +84,7 @@ for (const path of pages) {
 	await page.waitForTimeout(300);
 	// Any code block on a static page that shows the reader's stored URL would be a substitution bug;
 	// collect the page's code blocks for the check below.
-	codeTexts.push(...(await page.locator('pre').allInnerTexts()), ...(await page.locator('[data-code]').allAttributes().then((attrs) => attrs.map((a) => a['data-code'] ?? ''))));
+	codeTexts.push(...(await page.locator('pre').allInnerTexts()), ...(await page.locator('[data-code]').evaluateAll((els) => els.map((el) => el.getAttribute('data-code') ?? ''))));
 	const violations = await axeScan(page, { label: path });
 	if (violations.length) axeBad.push({ path, violations });
 }
@@ -105,12 +105,14 @@ await page.waitForTimeout(600);
 const storedShown = await page.locator(`text=${yourServer}`).count();
 if (storedShown === 0) console.error('privacy: the stored "your Payment Sandbox" URL was not offered in the reference');
 
-for (const stored of await page.evaluate(() => ({ local: Object.keys(localStorage), session: Object.keys(sessionStorage) }))) {
-	for (const bag of Object.values(stored)) {
-		for (const name of bag) {
-			const value = /local/i.test(name) ? await page.evaluate((n) => localStorage.getItem(n), name) : await page.evaluate((n) => sessionStorage.getItem(n), name);
-			if (value?.includes(token)) fail(`the API key was persisted in storage under ${name}`);
-		}
+// Read both storage areas whole: the reader's server URL may be remembered (that is the feature), the key never.
+const storage = await page.evaluate(() => {
+	const read = (area) => Object.fromEntries(Array.from({ length: area.length }, (_, i) => area.key(i)).map((name) => [name, area.getItem(name)]));
+	return { localStorage: read(localStorage), sessionStorage: read(sessionStorage) };
+});
+for (const [area, entries] of Object.entries(storage)) {
+	for (const [name, value] of Object.entries(entries)) {
+		if (value?.includes(token)) fail(`the API key was persisted in ${area} under ${name}`);
 	}
 }
 const cookies = await context.cookies();

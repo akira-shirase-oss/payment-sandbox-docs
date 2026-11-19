@@ -12,13 +12,8 @@ export default async function axeScan(page, { label = '', outFile = process.env.
 		// @ts-expect-error injected above
 		return await axe.run(document, { runOnly: { type: 'tag', values: tags } });
 	}, include);
-	writeFileSync(
-		outFile,
-		JSON.stringify(
-			{ label, url: page.url(), violations: results.violations.map(({ id, impact, description, nodes }) => ({ id, impact, description, nodes: nodes.map((n) => n.target).flat() })) },
-			null,
-			2,
-		),
-	);
-	return results.violations;
+	// One readable shape for the file and the caller: rule, impact, and each element as its selector plus its markup.
+	const violations = results.violations.map(({ id, impact, description, nodes }) => ({ id, impact, description, nodes: nodes.map((n) => `${JSON.stringify(n.target)} ${n.html.slice(0, 120)}`) }));
+	writeFileSync(outFile, JSON.stringify({ label, url: page.url(), violations }, null, 2));
+	return violations;
 }
