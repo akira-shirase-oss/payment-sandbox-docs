@@ -89,6 +89,11 @@ const operations = Object.values(spec.paths).reduce(
 				gap: 0.5rem;
 				font-weight: 600;
 			}
+			.ref-title {
+				margin: 0;
+				font-size: inherit;
+				font-weight: inherit;
+			}
 			.ref-links {
 				display: flex;
 				flex-wrap: wrap;
@@ -123,24 +128,26 @@ const operations = Object.values(spec.paths).reduce(
 		<header class="ref-bar">
 			<a class="ref-home" href="/">Payment Sandbox Docs</a>
 			<span aria-hidden="true">/</span>
-			<span>API reference</span>
+			<h1 class="ref-title">API reference</h1>
 			<nav class="ref-links" aria-label="Docs">
 				<a href="/">Documentation</a>
 				<a href="/openapi.json">openapi.json</a>
 			</nav>
 		</header>
-		<p class="ref-note">
-			<strong>SIMULATED MONEY ONLY:</strong> Payment Sandbox moves no real money and accepts no real cards.
-			{operations} operations on {paths} paths, generated from the OpenAPI document this site serves at <code>/openapi.json</code>
-			(version {spec.info.version}; a draft kept in sync with the server's routes by CI).
-			The examples call <code>https://sandbox.example.com</code>, a reserved example domain; pick <strong>the quick start on this machine</strong>
-			under <strong>Server</strong>, or set <strong>Your Payment Sandbox URL</strong> on an API page and it comes first here. The API answers
-			browser requests only from its own origins, so <strong>Test Request</strong> from this page reaches your server only if the browser allows it:
-			otherwise copy the request as <code>curl</code> from the code samples. Put a sandbox key (<code>sk_sim_…</code>) in
-			<strong>Authentication</strong> only for a local or test server. <a href="/">The docs</a>.
-		</p>
-		<div id="reference"></div>
-		<noscript><p>The interactive reference needs JavaScript. The document itself is at <a href="/openapi.json">/openapi.json</a>.</p></noscript>
+		<main>
+			<p class="ref-note">
+				<strong>SIMULATED MONEY ONLY:</strong> Payment Sandbox moves no real money and accepts no real cards.
+				{operations} operations on {paths} paths, generated from the OpenAPI document this site serves at <code>/openapi.json</code>
+				(version {spec.info.version}; a draft kept in sync with the server's routes by CI).
+				The examples call <code>https://sandbox.example.com</code>, a reserved example domain; pick <strong>the quick start on this machine</strong>
+				under <strong>Server</strong>, or set <strong>Your Payment Sandbox URL</strong> on an API page and it comes first here. The API answers
+				browser requests only from its own origins, so <strong>Test Request</strong> from this page reaches your server only if the browser allows it:
+				otherwise copy the request as <code>curl</code> from the code samples. Put a sandbox key (<code>sk_sim_…</code>) in
+				<strong>Authentication</strong> only for a local or test server. <a href="/">The docs</a>.
+			</p>
+			<div id="reference"></div>
+			<noscript><p>The interactive reference needs JavaScript. The document itself is at <a href="/openapi.json">/openapi.json</a>.</p></noscript>
+		</main>
 		<script type="module" is:inline>
 			import { createApiReference } from '/scalar/standalone.esm.js';
 			// The reader's own server, if they set one on an API page (src/lib/your-url.ts holds the
