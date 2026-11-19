@@ -61,6 +61,7 @@ export default defineConfig({
 					items: [
 						{ label: 'Introduction', slug: 'index' },
 						{ label: 'Quick start', slug: 'quick-start' },
+						{ label: 'Concepts', slug: 'concepts' },
 					],
 				},
 				{ label: 'API reference', link: '/api/reference/', attrs: { 'data-reference': '' } },

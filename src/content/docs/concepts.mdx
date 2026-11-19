@@ -1,0 +1,98 @@
+---
+title: Concepts
+description: What Payment Sandbox is, how a payment moves through it, and the rules that keep the simulation honest.
+---
+
+Payment Sandbox is a **simulated-money payment platform** for development and CI. A store
+integrates against it exactly the way it would against a real processor — holds, captures,
+voids, refunds, a hosted checkout, signed webhooks — and the sandbox answers the way a
+processor would, including the ways processors fail.
+
+:::caution[Simulated money only]
+Payment Sandbox moves no real money and accepts no real cards. There are no real balances,
+no banking connections and no production payment-provider routes anywhere in it. Raw card
+numbers are rejected before a request is even parsed, and its keys (`sk_sim_…`), secrets
+(`whsec_sim_…`, `cs_sim_…`) and network tokens (`tok_sim_…`) are shaped so nothing in the
+system can be mistaken for a real credential.
+:::
+
+## The moving parts
+
+Four processes make the sandbox:
+
+- **`sandbox-server`** — the API your store talks to (`/v1/*`), plus the hosted checkout and
+  the dashboard as static apps on their own origins. PostgreSQL is its store.
+- **`sandbox-sim`** — the simulated card network, a separate process with its own store.
+  The server calls it over HTTP like a real processor link: it approves, declines, loses
+  replies, goes unavailable, and keeps its own record of every operation it executed.
+- **The checkout** — the payer-facing page. The store never sees a card field (there is
+  none); the payer picks a scenario and the page drives the attempt.
+- **The dashboard** — the operator-facing view of payments, journal entries, webhooks and
+  reconciliation, on a fourth origin.
+
+The API listens on loopback port 56080 locally. The checkout and dashboard are separate
+origins on purpose: page code never holds payment authority.
+
+## Projects, keys and epochs
+
+A **project** is the tenant boundary: payments, keys, webhook endpoints and the dataset all
+belong to one. The bootstrap token creates the first project and its first admin key; keys
+are scoped (`admin`, `payments:write`, `read`) and only ever shown once — the server keeps
+their SHA-256, never the secret.
+
+`POST /v1/project/reset` opens a new **dataset epoch**: the current data is archived, not
+deleted, and the project starts empty under a new epoch number. A replayed or stale reset
+request fails rather than resetting twice.
+
+## A payment and its operations
+
+A **payment** is what the payer owes. A **hold** (`POST /v1/payments`) authorizes an amount;
+**capture** moves it, once or in parts, never more than the authorized remainder; **void**
+releases what is left; **refund** returns captured money, never more than the captured
+remainder. Capacity is reserved transactionally, so concurrent requests cannot overrun — the
+excess fails, it does not queue.
+
+Each action is an **operation** (`authorize`, `capture`, `void`, `refund`) with its own state:
+
+| State | Meaning |
+|---|---|
+| `pending` | In flight; the answer has not been decided. |
+| `succeeded` | The network approved and the journal was posted. |
+| `declined` | The network refused; nothing moved. |
+| `not_executed` | The network was unreachable or unavailable; nothing moved. |
+| `uncertain` | The reply was lost. The sandbox does not know — and says so. |
+
+`uncertain` is a first-class reported state, not an error to hide. It stays `uncertain`
+until the reconciler reads the operation back from the simulated network's own store; the
+operation identity commits before the network call, so the readback can always settle it.
+Never treat `uncertain` as success — and never retry blindly: ask `payments wait` or the
+reconciler first.
+
+## Idempotency
+
+Every money-moving request carries an `Idempotency-Key`. The same key with the same payload
+returns the recorded answer (`"replayed": true`); the same key with a *different* payload is
+a `409 idempotency_key_conflict`, never a silent reinterpretation. Safe retries are
+therefore mechanical: send the identical request again with the identical key.
+
+## The journal
+
+The journal is the **only authority** in the system. Every money movement posts
+double-entry lines — balanced per currency, immutable once posted. Corrections happen only
+as reversing entries, never edits.
+
+Balances are **derived**: `GET /v1/balances` sums the journal every time, and
+`GET /v1/balances/{currency}/{account}/explain` shows the exact lines behind a number. The
+reconciler continuously proves the derivation: every balance equals the sum of its journal
+entries, every payment equals its entries, and — with `?network=true` — the server's record
+matches the simulated network's.
+
+Nothing spans the simulator in one transaction, which is why uncertainty exists at all — and
+why reconciliation, not hope, is the answer to it.
+
+## Events and webhooks
+
+Resolving an operation emits an **event**; registered endpoints receive signed deliveries.
+Delivery is **at least once** and can arrive out of order: deduplicate by event id, verify
+the signature, and re-read the payment before fulfilling. Webhook secrets are sealed at rest
+and shown once; deliveries go only to loopback receivers on ports the server allows.
