@@ -1,0 +1,59 @@
+---
+title: Introduction
+description: What Payment Sandbox is, who it is for, and where to start reading.
+---
+
+import { CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+Payment Sandbox is an open-source, self-hosted payment platform for development and CI — with one
+hard rule: **it is simulated money**. It moves no real funds, accepts no real cards, and connects to
+no banking network. A separate simulated network supplies approvals, declines, lost replies and
+outages, so a store can exercise every way a payment fails — and prove its books balance — without
+a Stripe account.
+
+Every API answer carries `Sandbox-Simulated: true` and `"simulated": true`, keys are `sk_sim_…`,
+secrets `whsec_sim_…`, tokens `tok_sim_…`, and no UI anywhere has a card-number field. Raw card-like
+input is rejected before it is parsed.
+
+A payment is a hold, then captures, voids and refunds against it. Behind each one is an immutable,
+balanced, double-entry **journal** — the only accounting authority; every balance is derived from it
+and proven against it. Money-moving calls take an `Idempotency-Key`; a reply that never arrived
+stays **`uncertain`** — a first-class, reported state, never hidden as a success — until the
+reconciler reads it back.
+
+## Who it is for
+
+- **Stores in development and CI** call the HTTP API, the `sandbox-cli` CLI or the TypeScript SDK;
+  take payments through the hosted checkout (a link, a payer page, no card field); and consume
+  signed webhooks — at-least-once, honestly.
+- **Test writers** pick network scenarios by token (`tok_sim_approve`, `tok_sim_lost_reply`, …) or
+  replay the seeded scenario library and compare every trace.
+- **Operators** run one Rust server plus the simulator next to PostgreSQL: typed-confirmation
+  dataset resets that archive an epoch rather than delete it, consistent backups and rehearsed
+  restores, and reconciliation on demand.
+
+## How the pieces fit
+
+| Piece | What it is | Who uses it |
+|---|---|---|
+| `sandbox-server` | The API at `/v1`, the journal writer, the checkout and dashboard apps on their own origins | Your deploy |
+| `sandbox-sim` | The simulated network: approvals, declines, lost replies, outages, a test clock | The server only |
+| Hosted checkout | The payer's page: picks what the network does; no card field | The payer |
+| Dashboard | Payments, holds, journal entries, balances explained, deliveries | Store operators |
+| `sandbox-cli` | Payments, ledger, checkout, webhooks, scenarios, reset from a shell | Developers, CI |
+| TypeScript SDK | Typed client for the API | Your store's code |
+
+:::note[Status]
+Payment Sandbox is pre-release. Every page here describes what is on the `main` branch of
+[payment-sandbox](https://github.com/akira-shirase-oss/payment-sandbox) today, and every example
+runs against it in this site's CI. There are no release binaries or published packages yet — the
+quick start builds from a clone. The [changelog](/changelog/) lists what has shipped, newest first.
+:::
+
+## Start here
+
+<CardGrid>
+	<LinkCard title="Quick start" href="/quick-start/" description="Build the stack, take a simulated payment end to end, on this machine." />
+	<LinkCard title="API reference" href="/api/reference/" description="Every route of the HTTP API, generated from the OpenAPI draft, with try-it." />
+	<LinkCard title="Changelog" href="/changelog/" description="What changed and when, newest first." />
+</CardGrid>

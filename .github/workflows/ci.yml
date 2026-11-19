@@ -1,0 +1,167 @@
+# What every change to the docs must pass, and what runs each night against payment-sandbox main:
+#
+#   build      the site builds; every internal link resolves (starlight-links-validator fails the
+#              build); the search index, llms.txt, each page's Markdown copy, the changelog feed and
+#              the API reference are in the output; no private names or paths are in it.
+#   links      every external link in the built site answers.
+#   privacy    the built site contacts no other host; the API reference's Test Request goes only to
+#              the server it is given and keeps no token after a reload. Accessibility runs on the
+#              same pages in the same browser.
+#   openapi    the draft spec covers every route sandbox-server declares, and declares none it
+#              doesn't — checked both ways against crates/sandbox-server/src/routes.rs on main.
+#   coverage   every code block on every page runs, is a checked output, or says why it can't (not-run).
+#   snippets   payment-sandbox's stack is started with the quick start's own commands (Docker
+#              compose for PostgreSQL, cargo for the binaries); then every example on the pages
+#              runs, in order, and its output must match what the page shows (ids, times and
+#              secrets normalised).
+name: ci
+
+on:
+  push:
+    branches: [main, 'docs/**'] # docs/** so a branch is checked before review
+  pull_request:
+  schedule:
+    - cron: '41 5 * * *' # nightly: catch payment-sandbox main moving under the docs
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: build (links, search, llms.txt, Markdown copies)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - name: Every code block runs, is a checked output, or says why not
+        run: node scripts/snippets.mjs --coverage
+      - name: Build, validate internal links, check the output
+        run: npm run build
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: site
+          path: dist/
+          retention-days: 7
+
+  links:
+    name: external links
+    runs-on: ubuntu-latest
+    needs: build
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: site
+          path: dist
+      - uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8 # v2.9.0
+        with:
+          args: >-
+            --no-progress --max-retries 3 --timeout 20
+            --exclude '^https?://(localhost|127\.0\.0\.1)'
+            --exclude '^https://docs\.payment-sandbox\.404human\.dev'
+            --exclude '^https://github\.com/akira-shirase-oss/payment-sandbox-docs/(edit|issues/new)'
+            --exclude '^https://[a-z.]*example\.com'
+            --root-dir ${{ github.workspace }}/dist
+            'dist/**/*.html'
+          fail: true
+
+  privacy:
+    name: privacy (no third-party hosts; try-it goes only to the configured server; no token kept)
+    runs-on: ubuntu-latest
+    needs: build
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: site
+          path: dist
+      - name: Serve the built site and check every request it makes
+        run: |
+          npx astro preview --port 4321 --host 127.0.0.1 &
+          for i in $(seq 60); do curl -sf -o /dev/null http://127.0.0.1:4321/ && break; sleep 1; done
+          PREVIEW=http://127.0.0.1:4321 node scripts/check-privacy.mjs
+          # Accessibility on the same build: the helper first proves it fails a known-bad fixture,
+          # then every sitemap page passes.
+          PREVIEW=http://127.0.0.1:4321 node scripts/axe-scan.check.mjs
+
+  openapi:
+    name: draft OpenAPI spec covers the server's routes, both ways
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - name: Check out payment-sandbox main for its route table
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: akira-shirase-oss/payment-sandbox
+          path: payment-sandbox
+          persist-credentials: false
+      - name: Every server route in the spec; no spec path the server lacks
+        run: PAYMENT_SANDBOX_DIR=payment-sandbox node scripts/check-openapi.mjs
+
+  snippets:
+    name: examples run against payment-sandbox main
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - name: The steps the pages run, in order
+        run: node scripts/snippets.mjs --list
+      # The quick start's own install step clones payment-sandbox, builds sandbox-server,
+      # sandbox-sim and sandbox-cli with the toolchain its rust-toolchain.toml pins, starts
+      # PostgreSQL with its compose stack, and runs the servers under .snippets/work — the same
+      # commands the page shows a reader. ubuntu-latest has docker compose.
+      - name: Install the pinned Rust toolchain the product asks for
+        run: |
+          rustup --version
+          rustup toolchain install stable || rustup show
+          cargo --version
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: .snippets/work/payment-sandbox
+      - name: Run every example against the real stack
+        run: node scripts/snippets.mjs
+      - name: The servers' logs, if anything failed
+        if: failure()
+        run: tail -100 .snippets/work/payment-sandbox/*.log 2>/dev/null || true
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: snippets
+          path: .snippets/run/
+          if-no-files-found: ignore
+          retention-days: 7

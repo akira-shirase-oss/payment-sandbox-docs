@@ -1,0 +1,447 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Payment Sandbox API",
+    "version": "0.0.0-draft",
+    "description": "SIMULATED MONEY ONLY. Payment Sandbox is a payment platform for development and CI: it moves no real funds, accepts no real cards, and connects to no banking network. Every response carries a `Sandbox-Simulated: true` header and a `\"simulated\": true` field.\n\nThis document is a draft authored in the docs repository from the server's route table (`crates/sandbox-server/src/routes.rs`) and `docs/API.md`; CI keeps it in sync with the routes, both ways.",
+    "contact": { "name": "Payment Sandbox", "url": "https://github.com/akira-shirase-oss/payment-sandbox" },
+    "license": { "name": "MIT", "url": "https://opensource.org/licenses/MIT" }
+  },
+  "externalDocs": { "description": "The guides", "url": "https://docs.payment-sandbox.404human.dev" },
+  "servers": [
+    { "url": "https://sandbox.example.com", "description": "Your Payment Sandbox (an example domain)" },
+    { "url": "http://127.0.0.1:56080", "description": "The quick start on this machine" }
+  ],
+  "tags": [
+    { "name": "probes", "description": "Liveness and readiness. Never authenticated." },
+    { "name": "projects", "description": "Projects and their dataset epochs." },
+    { "name": "keys", "description": "Sandbox API keys and their scopes." },
+    { "name": "payments", "description": "Holds, captures, voids and refunds — all simulated." },
+    { "name": "ledger", "description": "Balances, per-account explanations and reconciliation against the journal." },
+    { "name": "checkout", "description": "Hosted checkout sessions for the payer." },
+    { "name": "webhooks", "description": "Signed webhook endpoints and the event feed." }
+  ],
+  "paths": {
+    "/healthz": {
+      "get": {
+        "tags": ["probes"], "operationId": "healthz", "summary": "Liveness",
+        "description": "The process answers. Touches nothing.",
+        "security": [],
+        "responses": { "200": { "description": "Alive.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Probe" } } } } }
+      }
+    },
+    "/readyz": {
+      "get": {
+        "tags": ["probes"], "operationId": "readyz", "summary": "Readiness",
+        "description": "The database answers within the readiness deadline and every supervised background task is running.",
+        "security": [],
+        "responses": {
+          "200": { "description": "Ready.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Probe" } } } },
+          "503": { "description": "Not ready (database down, or a background task down or stuck).", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Probe" } } } }
+        }
+      }
+    },
+    "/v1/sandbox": {
+      "get": {
+        "tags": ["probes"], "operationId": "sandboxNotice", "summary": "What this server is",
+        "description": "States that this is a simulated-money sandbox, for humans and for SDKs that check before use: the notice, the ledger semantics version and the supported currencies with their minor-unit exponents.",
+        "security": [],
+        "responses": { "200": { "description": "The sandbox notice.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SandboxNotice" } } } } }
+      }
+    },
+    "/v1/projects": {
+      "post": {
+        "tags": ["projects"], "operationId": "createProject", "summary": "Create a project",
+        "description": "Creates a project and returns its first admin key. The key's `secret` is in this answer only — keep it; the server stores only its hash. Takes the operator's bootstrap token (the server's `PS_BOOTSTRAP_TOKEN`), not a project key.",
+        "security": [{ "bootstrapToken": [] }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["slug", "name"], "properties": { "slug": { "type": "string", "example": "my-store" }, "name": { "type": "string", "example": "My store" } }, "additionalProperties": false } } } },
+        "responses": {
+          "201": { "description": "The project and its first admin key.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ProjectCreated" } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "409": { "description": "The slug is taken.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+          "422": { "$ref": "#/components/responses/Invalid" }
+        }
+      }
+    },
+    "/v1/project": {
+      "get": {
+        "tags": ["projects"], "operationId": "currentProject", "summary": "The calling project",
+        "description": "The project this key belongs to: its slug, name and current dataset epoch.",
+        "responses": {
+          "200": { "description": "The project.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Project" } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/v1/project/reset": {
+      "post": {
+        "tags": ["projects"], "operationId": "resetProject", "summary": "Reset the dataset (new epoch)",
+        "description": "Archives the current epoch and starts a fresh one: every payment, operation, journal entry, key (except the one used) and webhook endpoint is archived, never deleted. Requires the current epoch as `confirm_epoch` — a repeat against an epoch that is no longer current is `409 epoch_changed`, never a second reset.",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["confirm_epoch"], "properties": { "confirm_epoch": { "type": "integer", "example": 1 } }, "additionalProperties": false } } } },
+        "responses": {
+          "200": { "description": "The reset that ran.", "content": { "application/json": { "schema": { "type": "object", "properties": { "project": { "$ref": "#/components/schemas/Project" }, "reset": { "type": "object", "properties": { "from_epoch": { "type": "integer" }, "to_epoch": { "type": "integer" }, "archived_payments": { "type": "integer" } } }, "simulated": { "type": "boolean", "const": true } } } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "409": { "description": "`epoch_changed` — the named epoch is no longer current.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+          "422": { "description": "`confirmation_mismatch` — the epoch sent is not the current one.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+        }
+      }
+    },
+    "/v1/keys": {
+      "get": {
+        "tags": ["keys"], "operationId": "listKeys", "summary": "List keys",
+        "description": "The project's keys, newest first — labels, scopes and revocation, never secrets.",
+        "responses": {
+          "200": { "description": "The keys.", "content": { "application/json": { "schema": { "type": "object", "properties": { "keys": { "type": "array", "items": { "$ref": "#/components/schemas/ApiKey" } }, "simulated": { "type": "boolean", "const": true } } } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      },
+      "post": {
+        "tags": ["keys"], "operationId": "createKey", "summary": "Create a key",
+        "description": "A new key with a label and scopes. Its `secret` is in this answer only; the server stores the hash.",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["label", "scopes"], "properties": { "label": { "type": "string", "example": "store" }, "scopes": { "type": "array", "items": { "type": "string", "enum": ["read", "payments:write", "admin"] } } }, "additionalProperties": false } } } },
+        "responses": {
+          "201": { "description": "The key and its secret, shown once.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiKeyCreated" } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "422": { "$ref": "#/components/responses/Invalid" }
+        }
+      }
+    },
+    "/v1/keys/{key_id}/revoke": {
+      "post": {
+        "tags": ["keys"], "operationId": "revokeKey", "summary": "Revoke a key",
+        "description": "The key stops working at once; revoked keys answer `401 unauthorized`.",
+        "parameters": [{ "name": "key_id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": {
+          "200": { "description": "The revoked key.", "content": { "application/json": { "schema": { "type": "object", "properties": { "key": { "$ref": "#/components/schemas/ApiKey" }, "simulated": { "type": "boolean", "const": true } } } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/v1/payments": {
+      "get": {
+        "tags": ["payments"], "operationId": "listPayments", "summary": "List payments",
+        "description": "The most recent payments, newest first, a page at a time.",
+        "parameters": [
+          { "name": "limit", "in": "query", "schema": { "type": "integer", "minimum": 1, "maximum": 500, "default": 50 }, "description": "Page size, 1–500." },
+          { "name": "before", "in": "query", "schema": { "type": "string" }, "description": "The `next_before` cursor of the previous page." }
+        ],
+        "responses": {
+          "200": { "description": "A page of payments.", "content": { "application/json": { "schema": { "type": "object", "properties": { "payments": { "type": "array", "items": { "$ref": "#/components/schemas/Payment" } }, "next_before": { "type": "string", "nullable": true }, "simulated": { "type": "boolean", "const": true } } } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      },
+      "post": {
+        "tags": ["payments"], "operationId": "createPayment", "summary": "Authorize a payment (a hold)",
+        "description": "Authorizes `amount` minor units against a scenario token — the simulated network acts it out (`tok_sim_approve`, `tok_sim_decline_insufficient_funds`, `tok_sim_decline_do_not_honor`, `tok_sim_decline_expired`, `tok_sim_lost_reply`, `tok_sim_unavailable`). Requires `Idempotency-Key`. A `202` answer is `uncertain`: not known yet, never paid.",
+        "parameters": [{ "$ref": "#/components/parameters/IdempotencyKey" }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["amount", "currency", "token"], "properties": { "amount": { "type": "integer", "minimum": 1, "example": 4200, "description": "Minor units (4200 = USD 42.00)." }, "currency": { "$ref": "#/components/schemas/Currency" }, "token": { "type": "string", "example": "tok_sim_approve", "description": "The network scenario." }, "description": { "type": "string", "maxLength": 200 } }, "additionalProperties": false } } } },
+        "responses": {
+          "200": { "description": "The idempotent replay of an earlier request.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OperationResult" } } } },
+          "201": { "description": "The authorized payment.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OperationResult" } } } },
+          "202": { "description": "Uncertain: the network's reply was lost or it never answered; the reconciler settles it.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OperationResult" } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "409": { "description": "`idempotency_key_conflict` — this key was used with a different body.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+          "422": { "$ref": "#/components/responses/Invalid" },
+          "503": { "description": "`payment_busy` — the payment is busy; retry with the same key.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+        }
+      }
+    },
+    "/v1/payments/{payment_id}": {
+      "get": {
+        "tags": ["payments"], "operationId": "getPayment", "summary": "A payment and its operations",
+        "description": "The payment and every operation on it, from one snapshot.",
+        "parameters": [{ "$ref": "#/components/parameters/PaymentId" }],
+        "responses": {
+          "200": { "description": "The payment.", "content": { "application/json": { "schema": { "type": "object", "properties": { "payment": { "$ref": "#/components/schemas/Payment" }, "operations": { "type": "array", "items": { "$ref": "#/components/schemas/Operation" } }, "simulated": { "type": "boolean", "const": true } } } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/v1/payments/{payment_id}/journal": {
+      "get": {
+        "tags": ["payments"], "operationId": "paymentJournal", "summary": "The payment's journal entries",
+        "description": "Every double-entry journal line this payment posted, with the payment and its operations from the same snapshot. The journal is the only accounting authority; posted entries are immutable and balanced per currency.",
+        "parameters": [{ "$ref": "#/components/parameters/PaymentId" }],
+        "responses": {
+          "200": { "description": "The payment, its operations and its journal entries.", "content": { "application/json": { "schema": { "type": "object", "properties": { "payment": { "$ref": "#/components/schemas/Payment" }, "operations": { "type": "array", "items": { "$ref": "#/components/schemas/Operation" } }, "journal": { "type": "array", "items": { "$ref": "#/components/schemas/JournalEntry" } }, "simulated": { "type": "boolean", "const": true } } } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/v1/payments/{payment_id}/captures": {
+      "post": {
+        "tags": ["payments"], "operationId": "capturePayment", "summary": "Capture part or all of the hold",
+        "description": "Captures up to the authorized remainder; the excess can never be captured (`409 insufficient_capacity`). Requires `Idempotency-Key`.",
+        "parameters": [{ "$ref": "#/components/parameters/PaymentId" }, { "$ref": "#/components/parameters/IdempotencyKey" }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["amount"], "properties": { "amount": { "type": "integer", "minimum": 1, "example": 1200 } }, "additionalProperties": false } } } },
+        "responses": {
+          "200": { "description": "Replay of an earlier request.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OperationResult" } } } },
+          "201": { "description": "The capture.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OperationResult" } } } },
+          "202": { "description": "Uncertain — read the payment back before retrying.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OperationResult" } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "description": "`insufficient_capacity` or `idempotency_key_conflict`.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+          "422": { "$ref": "#/components/responses/Invalid" },
+          "503": { "$ref": "#/components/responses/PaymentBusy" }
+        }
+      }
+    },
+    "/v1/payments/{payment_id}/void": {
+      "post": {
+        "tags": ["payments"], "operationId": "voidPayment", "summary": "Release the uncaptured remainder",
+        "description": "Voids what has not been captured. Requires `Idempotency-Key`; the body is `{}`.",
+        "parameters": [{ "$ref": "#/components/parameters/PaymentId" }, { "$ref": "#/components/parameters/IdempotencyKey" }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "additionalProperties": false } } } },
+        "responses": {
+          "200": { "description": "Replay of an earlier request.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OperationResult" } } } },
+          "201": { "description": "The void.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OperationResult" } } } },
+          "202": { "description": "Uncertain — read the payment back before retrying.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OperationResult" } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "description": "`insufficient_capacity` or `idempotency_key_conflict`.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+          "422": { "$ref": "#/components/responses/Invalid" },
+          "503": { "$ref": "#/components/responses/PaymentBusy" }
+        }
+      }
+    },
+    "/v1/payments/{payment_id}/refunds": {
+      "post": {
+        "tags": ["payments"], "operationId": "refundPayment", "summary": "Refund captured money",
+        "description": "Refunds up to the captured remainder; simultaneous requests can never overrun. Requires `Idempotency-Key`.",
+        "parameters": [{ "$ref": "#/components/parameters/PaymentId" }, { "$ref": "#/components/parameters/IdempotencyKey" }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["amount"], "properties": { "amount": { "type": "integer", "minimum": 1, "example": 1200 } }, "additionalProperties": false } } } },
+        "responses": {
+          "200": { "description": "Replay of an earlier request.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OperationResult" } } } },
+          "201": { "description": "The refund.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OperationResult" } } } },
+          "202": { "description": "Uncertain — read the payment back before retrying.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OperationResult" } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "description": "`insufficient_capacity` or `idempotency_key_conflict`.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+          "422": { "$ref": "#/components/responses/Invalid" },
+          "503": { "$ref": "#/components/responses/PaymentBusy" }
+        }
+      }
+    },
+    "/v1/balances": {
+      "get": {
+        "tags": ["ledger"], "operationId": "balances", "summary": "Derived balances",
+        "description": "Every account's balance, derived from the journal — never authoritative on their own; `/v1/reconciliation` proves them.",
+        "responses": {
+          "200": { "description": "The balances.", "content": { "application/json": { "schema": { "type": "object", "properties": { "balances": { "type": "array", "items": { "$ref": "#/components/schemas/Balance" } }, "simulated": { "type": "boolean", "const": true } } } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/v1/checkout_sessions": {
+      "post": {
+        "tags": ["checkout"], "operationId": "createCheckoutSession", "summary": "Create a hosted checkout session",
+        "description": "The payer's page at the checkout origin. The answer holds `url` — the payer's link, with the session's secret in its fragment, which never reaches a server log and is shown once — plus the `client_secret` the payer's attempt uses. `capture_method` is `automatic` (captured as soon as authorized) or `manual`.",
+        "parameters": [{ "$ref": "#/components/parameters/IdempotencyKey" }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["amount", "currency"], "properties": { "amount": { "type": "integer", "minimum": 1, "example": 2500 }, "currency": { "$ref": "#/components/schemas/Currency" }, "description": { "type": "string", "maxLength": 200 }, "capture_method": { "type": "string", "enum": ["automatic", "manual"], "default": "automatic" }, "return_url": { "type": "string", "format": "uri", "description": "Where the payer's \"Back to the store\" link goes: http(s) on a loopback host." } }, "additionalProperties": false } } } },
+        "responses": {
+          "200": { "description": "Replay of an earlier request.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CheckoutSessionCreated" } } } },
+          "201": { "description": "The session, its secret and the payer's URL.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CheckoutSessionCreated" } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "422": { "$ref": "#/components/responses/Invalid" }
+        }
+      }
+    },
+    "/v1/checkout_sessions/{id}": {
+      "get": {
+        "tags": ["checkout"], "operationId": "getCheckoutSession", "summary": "A checkout session",
+        "description": "The session's state and every attempt — the same view the create answer held, without the secret. Poll it, or listen for the payment's webhooks.",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": {
+          "200": { "description": "The session.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CheckoutSession" } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/v1/webhook_endpoints": {
+      "get": {
+        "tags": ["webhooks"], "operationId": "listWebhookEndpoints", "summary": "List webhook endpoints",
+        "description": "The project's endpoints (never their secrets), a page at a time, with `consecutive_failures` and `circuit_open_until`.",
+        "responses": {
+          "200": { "description": "The endpoints.", "content": { "application/json": { "schema": { "type": "object", "properties": { "endpoints": { "type": "array", "items": { "$ref": "#/components/schemas/WebhookEndpoint" } }, "next_before": { "type": "string", "nullable": true }, "simulated": { "type": "boolean", "const": true } } } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" }
+        }
+      },
+      "post": {
+        "tags": ["webhooks"], "operationId": "createWebhookEndpoint", "summary": "Register a webhook endpoint",
+        "description": "Loopback receivers only, on a port the server allows (`PS_WEBHOOK_PORTS`, or any unclaimed port in the dev profile). The signing secret is in this answer only. Deliveries are at-least-once and may be duplicated or reordered: verify `Sandbox-Signature`, deduplicate the event id, re-read the payment's state.",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["url"], "properties": { "url": { "type": "string", "format": "uri", "example": "http://127.0.0.1:56100/webhooks" } }, "additionalProperties": false } } } },
+        "responses": {
+          "201": { "description": "The endpoint and its signing secret, shown once.", "content": { "application/json": { "schema": { "type": "object", "properties": { "endpoint": { "$ref": "#/components/schemas/WebhookEndpoint" }, "secret": { "type": "string", "example": "whsec_sim_…", "description": "Shown once." }, "simulated": { "type": "boolean", "const": true } } } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "422": { "$ref": "#/components/responses/Invalid" }
+        }
+      }
+    },
+    "/v1/webhook_endpoints/{endpoint_id}/rotate": {
+      "post": {
+        "tags": ["webhooks"], "operationId": "rotateWebhookEndpoint", "summary": "Rotate the signing secret",
+        "description": "A new signing secret; the old one keeps signing for 24 hours.",
+        "parameters": [{ "name": "endpoint_id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": {
+          "200": { "description": "The new secret, shown once.", "content": { "application/json": { "schema": { "type": "object", "properties": { "endpoint": { "$ref": "#/components/schemas/WebhookEndpoint" }, "secret": { "type": "string", "example": "whsec_sim_…" }, "simulated": { "type": "boolean", "const": true } } } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/v1/webhook_endpoints/{endpoint_id}/disable": {
+      "post": {
+        "tags": ["webhooks"], "operationId": "disableWebhookEndpoint", "summary": "Disable a webhook endpoint",
+        "description": "Stops deliveries to the endpoint.",
+        "parameters": [{ "name": "endpoint_id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": {
+          "200": { "description": "The disabled endpoint.", "content": { "application/json": { "schema": { "type": "object", "properties": { "endpoint": { "$ref": "#/components/schemas/WebhookEndpoint" }, "simulated": { "type": "boolean", "const": true } } } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/v1/events": {
+      "get": {
+        "tags": ["webhooks"], "operationId": "listEvents", "summary": "The event feed",
+        "description": "Every event the project emitted, newest first — the same events webhook deliveries carry.",
+        "parameters": [
+          { "name": "limit", "in": "query", "schema": { "type": "integer", "minimum": 1, "maximum": 500, "default": 50 } },
+          { "name": "before", "in": "query", "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": { "description": "A page of events.", "content": { "application/json": { "schema": { "type": "object", "properties": { "events": { "type": "array", "items": { "$ref": "#/components/schemas/Event" } }, "next_before": { "type": "string", "nullable": true }, "simulated": { "type": "boolean", "const": true } } } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/v1/reconciliation": {
+      "get": {
+        "tags": ["ledger"], "operationId": "reconciliation", "summary": "Reconcile the ledger",
+        "description": "Whether the derived balances, the journal and (with `network=true`) the simulated network's record agree. `clean` is true only when nothing disagrees. Reports have their own budget per project (`429 rate_limited` with `Retry-After`).",
+        "parameters": [{ "name": "network", "in": "query", "schema": { "type": "boolean" }, "description": "Also compare against the simulated network's operations." }],
+        "responses": {
+          "200": { "description": "The report.", "content": { "application/json": { "schema": { "type": "object", "properties": { "clean": { "type": "boolean" }, "report": { "type": "object" }, "network": { "type": "object" }, "simulated": { "type": "boolean", "const": true } } } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      }
+    },
+    "/v1/balances/{currency}/{account}/explain": {
+      "get": {
+        "tags": ["ledger"], "operationId": "explainBalance", "summary": "Explain a balance",
+        "description": "The journal lines that sum to the balance, with running totals — the proof, line by line. A cursor from before a restore is `409 stale_cursor`; one this server did not issue is `400 invalid_cursor`.",
+        "parameters": [
+          { "name": "currency", "in": "path", "required": true, "schema": { "$ref": "#/components/schemas/Currency" } },
+          { "name": "account", "in": "path", "required": true, "schema": { "type": "string", "example": "merchant_pending" } },
+          { "name": "limit", "in": "query", "schema": { "type": "integer", "minimum": 1, "maximum": 500, "default": 100 } },
+          { "name": "cursor", "in": "query", "schema": { "type": "string" }, "description": "The `next.cursor` of the previous page." }
+        ],
+        "responses": {
+          "200": { "description": "The explanation.", "content": { "application/json": { "schema": { "type": "object", "properties": { "currency": { "$ref": "#/components/schemas/Currency" }, "account": { "type": "string" }, "explanation": { "type": "array", "items": { "$ref": "#/components/schemas/Explanation" } }, "next": { "type": "object", "nullable": true, "properties": { "cursor": { "type": "string" } } }, "simulated": { "type": "boolean", "const": true } } } } } },
+          "400": { "description": "`invalid_cursor` — a cursor this server did not issue.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "409": { "description": "`stale_cursor` — a cursor from before a restore.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "sandboxKey": {
+        "type": "http", "scheme": "bearer",
+        "description": "A project's sandbox key, `sk_sim_…`, with scopes `read`, `payments:write` (implies read) or `admin` (implies both)."
+      },
+      "bootstrapToken": {
+        "type": "http", "scheme": "bearer",
+        "description": "The operator's `PS_BOOTSTRAP_TOKEN` — for `POST /v1/projects` only."
+      }
+    },
+    "parameters": {
+      "PaymentId": { "name": "payment_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
+      "IdempotencyKey": { "name": "Idempotency-Key", "in": "header", "required": true, "schema": { "type": "string" }, "description": "Required on every money-moving request. Reusing a key with a different body is `409 idempotency_key_conflict`; replaying it unchanged returns the first answer." }
+    },
+    "responses": {
+      "Unauthorized": { "description": "No key, a revoked key, or the wrong credential — the `error.code` says which.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+      "Forbidden": { "description": "The key's scopes don't cover this route.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+      "NotFound": { "description": "No such object in this project.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+      "Invalid": { "description": "The body failed validation — unknown fields, card-like fields (`raw_card_data_rejected`), a bad token (`invalid_payment_token`) or a shape error.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+      "PaymentBusy": { "description": "`payment_busy` — the payment is busy with other requests; retry with the same key after `Retry-After`.", "headers": { "Retry-After": { "schema": { "type": "integer" } } }, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+      "RateLimited": { "description": "`rate_limited` — the route's per-project budget is spent.", "headers": { "Retry-After": { "schema": { "type": "integer" } } }, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+    },
+    "schemas": {
+      "Probe": { "type": "object", "properties": { "status": { "type": "string", "example": "ready" }, "reason": { "type": "string" }, "task": { "type": "string" }, "tasks": { "type": "object" }, "simulated": { "type": "boolean", "const": true } } },
+      "SandboxNotice": { "type": "object", "properties": { "simulated": { "type": "boolean", "const": true }, "notice": { "type": "string" }, "ledger_semantics_version": { "type": "string" }, "currencies": { "type": "array", "items": { "type": "object", "properties": { "code": { "type": "string" }, "exponent": { "type": "integer" } } } } } },
+      "Currency": { "type": "string", "enum": ["USD", "EUR", "JPY", "KWD"], "description": "Minor units: 4200 = USD 42.00, 500 = JPY 500, 1250 = KWD 1.250." },
+      "Project": { "type": "object", "properties": { "slug": { "type": "string" }, "name": { "type": "string" }, "epoch": { "type": "integer" } } },
+      "ProjectCreated": { "type": "object", "properties": { "project": { "$ref": "#/components/schemas/Project" }, "api_key": { "$ref": "#/components/schemas/ApiKeyCreated" }, "simulated": { "type": "boolean", "const": true } } },
+      "ApiKey": { "type": "object", "properties": { "id": { "type": "string" }, "label": { "type": "string" }, "scopes": { "type": "array", "items": { "type": "string" } }, "revoked": { "type": "boolean" }, "created_at": { "type": "string", "format": "date-time" } } },
+      "ApiKeyCreated": { "type": "object", "properties": { "key": { "$ref": "#/components/schemas/ApiKey" }, "secret": { "type": "string", "example": "sk_sim_…", "description": "Shown once." }, "simulated": { "type": "boolean", "const": true } } },
+      "Payment": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "status": { "type": "string", "enum": ["authorizing", "declined", "failed", "authorized", "partially_captured", "captured", "voided", "partially_refunded", "refunded"] },
+          "amount": { "type": "integer" }, "currency": { "$ref": "#/components/schemas/Currency" },
+          "token": { "type": "string" }, "description": { "type": "string" },
+          "authorized": { "type": "integer" }, "captured": { "type": "integer" }, "voided": { "type": "integer" }, "refunded": { "type": "integer" },
+          "capturable": { "type": "integer" }, "refundable": { "type": "integer" }, "reserved": { "type": "integer" },
+          "decline_code": { "type": "string", "nullable": true }, "created_at": { "type": "string", "format": "date-time" }
+        }
+      },
+      "Operation": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "kind": { "type": "string", "enum": ["authorize", "capture", "void", "refund"] },
+          "state": { "type": "string", "enum": ["pending", "uncertain", "succeeded", "declined", "not_executed"] },
+          "amount": { "type": "integer" }, "idempotency_key": { "type": "string" },
+          "decline_code": { "type": "string", "nullable": true }, "attempts": { "type": "integer" }
+        }
+      },
+      "OperationResult": { "type": "object", "properties": { "payment": { "$ref": "#/components/schemas/Payment" }, "operation": { "$ref": "#/components/schemas/Operation" }, "replayed": { "type": "boolean" }, "simulated": { "type": "boolean", "const": true } } },
+      "JournalEntry": { "type": "object", "properties": { "id": { "type": "string" }, "operation_id": { "type": "string" }, "currency": { "$ref": "#/components/schemas/Currency" }, "account": { "type": "string" }, "debit_minor": { "type": "integer" }, "credit_minor": { "type": "integer" }, "posted_at": { "type": "string", "format": "date-time" } } },
+      "Balance": { "type": "object", "properties": { "currency": { "$ref": "#/components/schemas/Currency" }, "account": { "type": "string" }, "normal_side": { "type": "string", "enum": ["debit", "credit"] }, "balance_minor": { "type": "integer" }, "balance": { "type": "string" }, "signed_minor": { "type": "integer" } } },
+      "Explanation": { "type": "object", "properties": { "entry": { "$ref": "#/components/schemas/JournalEntry" }, "running_balance_minor": { "type": "integer" } } },
+      "CheckoutSession": {
+        "type": "object",
+        "properties": {
+          "session": { "type": "object", "properties": { "id": { "type": "string" }, "amount": { "type": "integer" }, "currency": { "$ref": "#/components/schemas/Currency" }, "capture_method": { "type": "string" }, "expires_at": { "type": "string", "format": "date-time" }, "expired": { "type": "boolean" }, "attempts_left": { "type": "integer" }, "state": { "type": "string" }, "next_action": { "type": "string" } } },
+          "attempt": { "type": "object", "nullable": true },
+          "captured": { "type": "integer" }, "refunded": { "type": "integer" },
+          "attempts": { "type": "array", "items": { "type": "object" } },
+          "simulated": { "type": "boolean", "const": true }
+        }
+      },
+      "CheckoutSessionCreated": { "allOf": [{ "$ref": "#/components/schemas/CheckoutSession" }, { "type": "object", "properties": { "client_secret": { "type": "string", "example": "cs_sim_…", "description": "The payer's attempt secret, shown once." }, "url": { "type": "string", "format": "uri", "description": "The payer's link; the secret lives in its fragment, never in a server log." } } }] },
+      "WebhookEndpoint": { "type": "object", "properties": { "id": { "type": "string" }, "url": { "type": "string", "format": "uri" }, "enabled": { "type": "boolean" }, "consecutive_failures": { "type": "integer" }, "circuit_open_until": { "type": "string", "format": "date-time", "nullable": true }, "created_at": { "type": "string", "format": "date-time" } } },
+      "Event": { "type": "object", "properties": { "id": { "type": "string" }, "type": { "type": "string", "example": "payment.captured" }, "payment_id": { "type": "string" }, "data": { "type": "object" }, "created_at": { "type": "string", "format": "date-time" } } },
+      "Error": {
+        "type": "object",
+        "description": "Every failure: `error.code` is stable, `request_id` names the request, and 429/503 also send `Retry-After`.",
+        "properties": {
+          "error": { "type": "object", "properties": { "code": { "type": "string", "example": "route_not_found" }, "message": { "type": "string" }, "request_id": { "type": "string" } } },
+          "simulated": { "type": "boolean", "const": true }
+        }
+      }
+    }
+  },
+  "security": [{ "sandboxKey": [] }]
+}

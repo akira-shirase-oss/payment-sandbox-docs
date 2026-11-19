@@ -1,0 +1,188 @@
+---
+title: Quick start
+description: Build Payment Sandbox from a clone, start its stack, and take a simulated payment end to end — hold, capture, refund, reconcile — on this machine.
+---
+
+:::caution[SIMULATED MONEY ONLY]
+Payment Sandbox moves no real funds, accepts no real cards, and connects to no banking network.
+Everything this page creates — the payment, the balance, the keys — is simulated.
+:::
+
+By the end of this page you will have built Payment Sandbox from a clone, started its stack, and
+taken a simulated payment end to end: a hold, a capture, a refund, a lost reply, and a ledger that
+reconciles — the same commands the product's README uses.
+
+Everything here runs on **this machine**, on the product's own default addresses
+(`http://127.0.0.1:56080` for the API). You need Docker (for PostgreSQL), rustup and Node 22.17+.
+
+## 1. Clone and build
+
+```sh run=quickstart step=install
+git clone https://github.com/akira-shirase-oss/payment-sandbox
+```
+
+```sh run=quickstart
+cd payment-sandbox
+# On macOS with rustup from Homebrew, the pinned toolchain needs:
+#   export PATH="$(brew --prefix rustup)/bin:$PATH"
+```
+
+## 2. PostgreSQL, then the schema
+
+The product's `stack.sh` brings up PostgreSQL (compose project `payment-sandbox`, on
+`127.0.0.1:56432`, plus a second cluster for restore rehearsals) and prints the environment the
+server and tests read — the database URLs, the `dev` profile and the local credentials:
+
+```sh run=quickstart step=stack
+scripts/stack.sh up && eval "$(scripts/stack.sh env)"
+```
+
+```text output=quickstart
+stack ok: postgres on 127.0.0.1:56432, the restore cluster on 127.0.0.1:56450
+```
+
+`setup` creates the database and its roles; `migrate` applies the schema as the owner:
+
+```sh run=quickstart
+cargo run -q -p sandbox-server -- setup
+cargo run -q -p sandbox-server -- migrate
+```
+
+## 3. The checkout and dashboard
+
+The two browser apps are static builds the server serves on their own origins:
+
+```sh run=quickstart step=frontend
+npm ci && npm run build
+```
+
+## 4. Start the simulator and the API
+
+The operator's bootstrap token creates projects; the secret key seals webhook signing secrets at
+rest. `sandbox-sim` is the simulated network; `sandbox-server` is the API plus the two apps. The
+binaries `cargo` just built run directly — `cargo run -p …` works too:
+
+```sh run=quickstart step=servers
+export PS_BOOTSTRAP_TOKEN=$(openssl rand -hex 24)
+export PS_SECRET_KEY=$(openssl rand -hex 32)
+./target/debug/sandbox-sim > sim.log 2>&1 &
+PS_CHECKOUT_DIR=apps/checkout/build PS_DASHBOARD_DIR=apps/dashboard/build \
+  ./target/debug/sandbox-server > server.log 2>&1 &
+for i in $(seq 60); do curl -sf -o /dev/null http://127.0.0.1:56080/readyz && break; sleep 1; done
+```
+
+```sh run=quickstart
+curl -s http://127.0.0.1:56080/readyz
+```
+
+```json output=quickstart
+{
+  "status": "ready",
+  "tasks": {},
+  "simulated": true
+}
+```
+
+## 5. A project and its first key
+
+The bootstrap token creates a project; the answer holds its first admin key, shown once — keep it
+in your environment, never on a command line:
+
+```sh run=quickstart
+project=$(curl -s -X POST http://127.0.0.1:56080/v1/projects \
+  -H "Authorization: Bearer $PS_BOOTSTRAP_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"slug": "my-store", "name": "My store"}')
+echo "$project" | jq .
+export PS_API_KEY=$(jq -r .api_key.secret <<<"$project")
+```
+
+```json output=quickstart
+{
+  "project": {},
+  "api_key": {}
+}
+```
+
+## 6. A simulated payment, end to end
+
+The CLI talks to the API the server just started:
+
+```sh run=quickstart
+cargo run -q -p sandbox-cli -- status
+```
+
+```text output=quickstart
+…
+```
+
+A purchase: hold 42.00 (USD 42.00 — amounts are integer minor units), capture it, refund 12.00:
+
+```sh run=quickstart
+payment=$(cargo run -q -p sandbox-cli -- --json payments create --amount 42.00 --currency USD --description "Order 1001" | jq -r .payment.id)
+cargo run -q -p sandbox-cli -- payments capture "$payment" --amount 42.00
+```
+
+```text output=quickstart
+…
+```
+
+```sh run=quickstart
+cargo run -q -p sandbox-cli -- payments refund "$payment" --amount 12.00
+```
+
+```text output=quickstart
+…
+```
+
+## 7. The books balance, provably
+
+Every balance is explained by journal lines — the journal is the only authority — and the ledger
+reconciles:
+
+```sh run=quickstart
+cargo run -q -p sandbox-cli -- ledger explain USD merchant_pending
+```
+
+```text output=quickstart
+…
+```
+
+```sh run=quickstart
+cargo run -q -p sandbox-cli -- reconcile
+```
+
+```text output=quickstart
+…
+```
+
+## 8. A reply that was lost
+
+`tok_sim_lost_reply` makes the network approve and the reply vanish. Exit status `4` means
+**not known yet** — never "paid" — until `payments wait` (or the reconciler) settles it:
+
+```sh run=quickstart exit=4
+lost=$(cargo run -q -p sandbox-cli -- --json payments create --amount 7.00 --currency USD --scenario lost_reply)
+echo "$lost" | jq .
+```
+
+```json output=quickstart
+…
+```
+
+```sh run=quickstart
+cargo run -q -p sandbox-cli -- payments wait "$(jq -r .payment.id <<<"$lost")"
+```
+
+```text output=quickstart
+…
+```
+
+## What's running now
+
+The API on `http://127.0.0.1:56080`, the simulated network on `127.0.0.1:56081`, the checkout on
+`http://127.0.0.1:56083`, and the dashboard on `http://dashboard.localhost:56084` — sign in with
+the same `sk_sim_…` key to see the payment, its journal entries and the balances explained. The
+dev store on `127.0.0.1:56082` consumes webhooks when you start it.
+
+From here: the [API reference](/api/reference/) for every route, or the [changelog](/changelog/)
+for what has shipped.

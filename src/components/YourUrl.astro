@@ -1,0 +1,221 @@
+---
+/**
+ * "Your Payment Sandbox URL": the reader enters their server once, and every code block on the page
+ * (and what its copy button copies) shows it in place of https://sandbox.example.com, the reserved
+ * example domain the pages are written with. Kept in this browser only (localStorage), never sent
+ * anywhere; https:// only, or plain http:// for this machine. Reset puts the example back.
+ */
+---
+
+<div class="your-url not-content print:hidden" data-your-url>
+	<p class="your-url-compact">
+		<span>Examples: <code data-current>https://sandbox.example.com</code></span>
+		<span aria-hidden="true">·</span>
+		<button type="button" class="your-url-change" aria-expanded="false" aria-controls="your-url-form">Change</button>
+	</p>
+	<form class="your-url-form" id="your-url-form" novalidate>
+		<label for="your-url-input">Your Payment Sandbox URL</label>
+		<div class="your-url-row">
+			<input
+				id="your-url-input"
+				name="url"
+				type="url"
+				inputmode="url"
+				autocomplete="url"
+				spellcheck="false"
+				placeholder="https://sandbox.example.com"
+				aria-describedby="your-url-status"
+			/>
+			<button type="submit">Use</button>
+			<button type="button" data-reset>Reset</button>
+		</div>
+		<p id="your-url-status" class="your-url-status" role="status" aria-live="polite"></p>
+	</form>
+</div>
+
+<script>
+	import { EXAMPLE, parseRunnerUrl, readStoredUrl, writeStoredUrl } from '../lib/your-url';
+
+	/** Each code text node's own text, as the page was built, so applying and resetting are exact. */
+	const original = new WeakMap<Node, string>();
+	const originalCopy = new WeakMap<HTMLElement, string>();
+
+	function apply(url: string) {
+		for (const block of document.querySelectorAll('.sl-markdown-content pre')) {
+			const walker = document.createTreeWalker(block, NodeFilter.SHOW_TEXT);
+			for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+				if (!original.has(node)) {
+					if (!node.nodeValue?.includes(EXAMPLE)) continue;
+					original.set(node, node.nodeValue);
+				}
+				node.nodeValue = (original.get(node) ?? '').replaceAll(EXAMPLE, url);
+			}
+		}
+		// Expressive Code's copy button copies its data-code attribute, not the visible text.
+		for (const button of document.querySelectorAll<HTMLElement>('.sl-markdown-content [data-code]')) {
+			if (!originalCopy.has(button)) {
+				if (!button.dataset.code?.includes(EXAMPLE)) continue;
+				originalCopy.set(button, button.dataset.code);
+			}
+			button.dataset.code = (originalCopy.get(button) ?? '').replaceAll(EXAMPLE, url);
+		}
+	}
+
+	for (const root of document.querySelectorAll<HTMLElement>('[data-your-url]')) {
+		const form = root.querySelector('form');
+		const input = root.querySelector('input');
+		const status = root.querySelector('.your-url-status');
+		const reset = root.querySelector('[data-reset]');
+		if (!form || !input || !status || !reset) continue;
+
+		const change = root.querySelector<HTMLButtonElement>('.your-url-change');
+		const current = root.querySelector('[data-current]');
+		// On a phone the control is one line until "Change" opens the field.
+		const setOpen = (open: boolean) => {
+			root.toggleAttribute('data-open', open);
+			change?.setAttribute('aria-expanded', String(open));
+		};
+		change?.addEventListener('click', () => {
+			const open = change.getAttribute('aria-expanded') !== 'true';
+			setOpen(open);
+			if (open) input.focus();
+		});
+
+		const show = (url: string, note = '') => {
+			apply(url);
+			if (current) current.textContent = url;
+			input.value = url === EXAMPLE ? '' : url;
+			status.textContent =
+				url === EXAMPLE
+					? `Examples use ${EXAMPLE}, a reserved example domain. Enter your server to see your own.`
+					: `Examples use ${url}. Kept in this browser only.${note ? ` ${note}` : ''}`;
+		};
+
+		const stored = readStoredUrl();
+		show(stored?.url ?? EXAMPLE, stored?.note);
+
+		form.addEventListener('submit', (event) => {
+			event.preventDefault();
+			if (input.value.trim() === '') {
+				writeStoredUrl(null);
+				show(EXAMPLE);
+				return;
+			}
+			const parsed = parseRunnerUrl(input.value);
+			if ('error' in parsed) {
+				status.textContent = parsed.error;
+				return;
+			}
+			writeStoredUrl(parsed.url);
+			show(parsed.url, parsed.note);
+		});
+		reset.addEventListener('click', () => {
+			writeStoredUrl(null);
+			show(EXAMPLE);
+		});
+	}
+</script>
+
+<style>
+	.your-url {
+		margin-top: 1rem;
+		padding: 0.75rem 1rem;
+		border: 1px solid var(--sl-color-gray-5);
+		border-radius: 0.5rem;
+		font-size: var(--sl-text-sm);
+	}
+	.your-url label {
+		display: block;
+		font-weight: 600;
+		margin-bottom: 0.375rem;
+	}
+	.your-url-row {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.5rem;
+	}
+	.your-url input {
+		flex: 1 1 14rem;
+		min-width: 0;
+		font: inherit;
+		font-family: var(--__sl-font-mono, ui-monospace, monospace);
+		font-size: var(--sl-text-sm);
+		padding: 0.375rem 0.5rem;
+		color: var(--sl-color-white);
+		background: var(--sl-color-black);
+		border: 1px solid var(--sl-color-gray-4);
+		border-radius: 0.375rem;
+	}
+	.your-url button {
+		font: inherit;
+		font-size: var(--sl-text-sm);
+		padding: 0.375rem 0.75rem;
+		border-radius: 0.375rem;
+		border: 1px solid var(--sl-color-gray-4);
+		background: transparent;
+		color: var(--sl-color-white);
+		cursor: pointer;
+	}
+	.your-url button[type='submit'] {
+		background: var(--sl-color-accent);
+		border-color: var(--sl-color-accent);
+		color: var(--sl-color-black);
+	}
+	.your-url-compact {
+		display: none;
+		margin: 0;
+		align-items: baseline;
+		gap: 0.375rem;
+		font-size: var(--sl-text-xs);
+		color: var(--sl-color-gray-2);
+		white-space: nowrap;
+	}
+	.your-url-compact > span:first-child {
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+	.your-url .your-url-change {
+		flex: none;
+		padding: 0;
+		border: 0;
+		font-size: var(--sl-text-xs);
+		color: var(--sl-color-text-accent);
+		text-decoration: underline;
+		text-underline-offset: 0.2em;
+	}
+	/* On a phone: one line, "Examples use … · Change", until Change opens the field. */
+	@media (max-width: 30rem) {
+		.your-url {
+			padding: 0.5rem 0.625rem;
+		}
+		.your-url-compact {
+			gap: 0.25rem;
+		}
+		.your-url-compact code {
+			font-size: 0.75rem;
+			padding: 0;
+			background: none;
+		}
+		.your-url-compact {
+			display: flex;
+		}
+		.your-url:not([data-open]) .your-url-form {
+			display: none;
+		}
+		.your-url[data-open] .your-url-form {
+			margin-top: 0.5rem;
+		}
+		.your-url-row {
+			flex-wrap: nowrap;
+		}
+		.your-url input {
+			flex: 1 1 auto;
+		}
+	}
+	.your-url-status {
+		margin: 0.5rem 0 0;
+		color: var(--sl-color-gray-2);
+		font-size: var(--sl-text-xs);
+	}
+</style>

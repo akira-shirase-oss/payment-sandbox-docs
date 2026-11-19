@@ -1,0 +1,3 @@
+User-agent: *
+Allow: /
+Sitemap: https://docs.payment-sandbox.404human.dev/sitemap-index.xml
