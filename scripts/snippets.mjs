@@ -127,6 +127,11 @@ export const MAPPINGS = [
  *  `pay.sandbox.example.com`. */
 const localOf = (mappings) => mappings.filter(({ shown }) => new URL(shown).hostname === '127.0.0.1');
 
+/** Project slugs are unique per installation and the dataset outlives a run, so the page's `my-store`
+ *  runs as a fresh slug each time — a second run would otherwise hit the taken-slug `409`. */
+const SHOWN_SLUG = 'my-store';
+const RUN_SLUG = `my-store-${process.pid}`;
+
 /**
  * A block's code as it runs: the example domains and every shown local address becomes the stack's.
  * Full URLs first, then the host:port forms (`PS_LISTEN=127.0.0.1:56080`, `Origin: ...:56083`), then
@@ -135,12 +140,12 @@ const localOf = (mappings) => mappings.filter(({ shown }) => new URL(shown).host
  * amount in prose, but only code blocks are rewritten, and an amount of exactly a shown port's
  * minor units is one the docs simply never use.
  */
-export const runnable = (code, mappings = MAPPINGS) => {
+export const runnable = (code, mappings = MAPPINGS, slug = RUN_SLUG) => {
 	let out = code;
 	for (const entry of mappings) out = out.replaceAll(entry.shown, realOf(entry));
 	for (const entry of localOf(mappings)) out = out.replaceAll(hostPort(entry.shown), hostPort(realOf(entry)));
 	for (const entry of localOf(mappings)) out = out.replace(new RegExp(`\\b${new URL(entry.shown).port}\\b`, 'g'), new URL(realOf(entry)).port);
-	return out;
+	return out.replaceAll(SHOWN_SLUG, slug);
 };
 
 // ---------------------------------------------------------------- reading the pages
@@ -242,7 +247,7 @@ const mask = (text) => text.replace(SECRET, '$1…');
 /** What the page shows: headers as they came, a JSON body indented, local addresses as the page writes them, secrets elided. */
 export function display(text, file) {
 	const local = LOCAL_PAGES.test(file ?? '');
-	let swapped = text;
+	let swapped = text.replaceAll(RUN_SLUG, SHOWN_SLUG);
 	for (const entry of MAPPINGS) swapped = swapped.replace(new RegExp(escape(realOf(entry)), 'g'), local ? shownLocalOf(entry.shown) : hostedOf(entry.shown));
 	const { head, body } = split(swapped);
 	const json = jsonBody(body);
@@ -271,7 +276,7 @@ const escape = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 /** What is compared: values that differ on every run become placeholders. */
 export function normalise(text) {
-	let swapped = text;
+	let swapped = text.replaceAll(RUN_SLUG, SHOWN_SLUG);
 	for (const entry of MAPPINGS) swapped = swapped.replace(new RegExp(escape(realOf(entry)), 'g'), `<${name(entry.shown)}>`);
 	for (const { shown } of MAPPINGS) swapped = swapped.replaceAll(shown, `<${name(shown)}>`);
 	swapped = swapped.replaceAll(escape(workdir), '<work>');
@@ -280,6 +285,9 @@ export function normalise(text) {
 	const flatBody = json === null ? body.trim() : JSON.stringify(json);
 	const all = mask(`${head ?? ''}\n\n${flatBody}`)
 		.replace(/"(id|payment_id|session|client_secret|secret|cursor|next_before|next_cursor)":\s*"(cs_|whsec_)?[^"]*?"/g, '"$1":"<id>"')
+		.replace(/\bcli_[a-z]+\b/g, 'cli_<key>') // the CLI's generated idempotency keys
+		.replace(/"(created_at|since_beat_ms|finished_at)":\s*\d+/g, '"$1":<n>') // unix seconds, beat ages
+		.replace(/^#\d+/gm, '#<n>') // journal entry numbers
 		.replace(/\b[0-9a-f]{64}\b/g, '<hex64>') // generated keys (openssl rand -hex 32), raw secrets
 		.replace(/"(finished_at|expires_at|created_at|circuit_open_until)":\s*"?\d{4}-?\d\d-?\d\d[^",\s]*"?/g, '"$1":"<time>"')
 		.replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/g, '<uuid>')
@@ -406,6 +414,8 @@ function runAll(steps) {
 	let ok = true;
 	steps.forEach((step, index) => {
 		if (step.kind !== 'run' || !step.expect) return;
+		// A step skipped this run leaves no .out; its output stays unchecked rather than "empty".
+		if (skip.has(meta(step.info, 'step') ?? '')) return;
 		const outFile = join(dir, `${index}.out`);
 		// A suite that stopped early leaves no .out for the steps it never reached — count them
 		// as differences (the run already failed) instead of crashing on the missing file.
@@ -423,7 +433,7 @@ function update(steps) {
 	const byFile = new Map();
 	for (const step of steps) {
 		// Only blocks whose output really differs are rewritten, so ids and dates don't churn.
-		if (step.kind === 'run' && step.expect && step.actual !== undefined && !matches(step.actual, step.expect)) {
+		if (step.kind === 'run' && step.expect && step.actual !== undefined && !skip.has(meta(step.info, 'step') ?? '') && !matches(step.actual, step.expect)) {
 			const list = byFile.get(step.file) ?? [];
 			list.push(step.expect.end === undefined ? null : step);
 			byFile.set(step.file, list);
