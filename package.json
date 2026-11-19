@@ -10,7 +10,7 @@
   },
   "scripts": {
     "dev": "astro dev",
-    "build": "node scripts/check-urls.mjs && node scripts/copy-scalar.mjs && astro build && node scripts/focusable-tables.mjs && node scripts/csp-hashes.mjs && node scripts/check-dist.mjs",
+    "build": "node scripts/check-urls.mjs && node scripts/copy-scalar.mjs && astro build && node scripts/focusable-tables.mjs && node scripts/csp-hashes.mjs && node scripts/check-dist.mjs && node --test scripts/a11y-build.test.mjs",
     "preview": "astro preview",
     "check:openapi": "node scripts/check-openapi.mjs",
     "snippets": "node scripts/snippets.mjs",
