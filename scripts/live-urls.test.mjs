@@ -15,7 +15,7 @@ test('a this-machine URL is fine on the local pages, forbidden elsewhere', () =>
 	assert.deepEqual(problems(local, 'src/content/docs/cli.mdx'), []);
 	assert.deepEqual(problems(local, 'src/content/docs/sdk.mdx'), []);
 	assert.deepEqual(problems(local, 'src/content/docs/self-hosting/configuration.mdx'), []);
-	assert.equal(problems(local, 'src/content/docs/payments.mdx').length, 1);
+	assert.equal(problems(local, 'src/content/docs/concepts.mdx').length, 1);
 	assert.deepEqual(problems(local, 'src/pages/api/reference.astro'), [], 'the reference lists the local server');
 });
 

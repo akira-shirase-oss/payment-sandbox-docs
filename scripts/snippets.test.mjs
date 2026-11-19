@@ -73,7 +73,7 @@ test('match=lines accepts a stream whose order differs', () => {
 test('display maps a real address back to what the page shows', () => {
 	const got = display('HTTP/1.1 200 OK\n\n{"webhook_url":"http://127.0.0.1:56100/hook"}', 'src/content/docs/cli.mdx');
 	assert.match(got, /127\.0\.0\.1:56100\/hook/);
-	const hosted = display('{"url":"http://127.0.0.1:56100"}', 'src/content/docs/webhooks.mdx');
+	const hosted = display('{"url":"http://127.0.0.1:56100"}', 'src/content/docs/concepts.mdx');
 	assert.match(hosted, /receiver\.example\.com/);
 });
 
@@ -91,5 +91,5 @@ test('coverage kinds are read from the info string, not inside other keys', () =
 test('shownBase picks the address a page pretends to use', () => {
 	assert.equal(shownBase('src/content/docs/quick-start.mdx'), 'http://127.0.0.1:56080');
 	assert.equal(shownBase('src/content/docs/self-hosting/configuration.mdx'), 'http://127.0.0.1:56080');
-	assert.equal(shownBase('src/content/docs/payments.mdx'), EXAMPLE_BASE);
+	assert.equal(shownBase('src/content/docs/concepts.mdx'), EXAMPLE_BASE);
 });

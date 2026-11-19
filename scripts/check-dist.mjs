@@ -53,7 +53,7 @@ const FORBIDDEN = [
 	{ pattern: /\/Users\/[^\s"'`<>]+/, why: 'a macOS home path' },
 	{ pattern: /\/home\/[^\s"'`<>]+/, why: 'a Linux home path' },
 	{ pattern: /\bD-\d{3}\b/, why: 'an internal decision number — paraphrase it' },
-	{ pattern: /\b(sk|whsec|cs)_sim_[0-9a-fA-F]{8,}\b/, why: 'an unmasked sandbox credential — the docs show sk_sim_…' },
+	{ pattern: /\b(sk|whsec|cs)_sim_[0-9a-z]{8,}\b/, why: 'an unmasked sandbox credential — the docs show sk_sim_…' },
 	{ pattern: /\b(sk|pk|rk)_(live|prod)_[A-Za-z0-9]+/, why: 'a real-processor-shaped key — simulated money never has one' },
 ];
 const TEXT_EXT = /\.(html|css|js|mjs|json|xml|txt|md|svg|webmanifest|toml|yaml|yml)$/;

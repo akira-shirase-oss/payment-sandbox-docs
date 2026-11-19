@@ -71,7 +71,7 @@ const EXAMPLE_CHECKOUT = 'https://pay.sandbox.example.com';
 const EXAMPLE_DASHBOARD = 'https://dashboard.sandbox.example.com';
 const EXAMPLE_STORE = 'https://store.sandbox.example.com';
 const EXAMPLE_RECEIVER = 'https://receiver.example.com';
-const LOCAL_PAGES = /content\/docs\/(quick-start|cli|sdk)\.mdx$|content\/docs\/self-hosting\//;
+const LOCAL_PAGES = /content\/docs\/(quick-start|payments|ledger|checkout|webhooks|scenarios|cli|sdk)\.mdx$|content\/docs\/self-hosting\//;
 /** The address a page shows its examples with. */
 export const shownBase = (file) => (LOCAL_PAGES.test(file ?? '') ? DEFAULT_BASE : EXAMPLE_BASE);
 /** Suites in the order they run; later suites build on the state earlier ones leave. */
@@ -241,7 +241,7 @@ function indent(body) {
  * client secret). Never committed — the page writes `sk_sim_…`, and normalise() maps the real value
  * to the same elision so the comparison still proves the field was there and shaped right.
  */
-const SECRET = /\b((?:sk|whsec|cs)_sim_)[0-9a-fA-F]{8,}\b/g;
+const SECRET = /\b((?:sk|whsec|cs)_sim_)[0-9a-z]{8,}\b/g;
 const mask = (text) => text.replace(SECRET, '$1…');
 
 /** What the page shows: headers as they came, a JSON body indented, local addresses as the page writes them, secrets elided. */
@@ -279,15 +279,18 @@ export function normalise(text) {
 	let swapped = text.replaceAll(RUN_SLUG, SHOWN_SLUG);
 	for (const entry of MAPPINGS) swapped = swapped.replace(new RegExp(escape(realOf(entry)), 'g'), `<${name(entry.shown)}>`);
 	for (const { shown } of MAPPINGS) swapped = swapped.replaceAll(shown, `<${name(shown)}>`);
-	swapped = swapped.replaceAll(escape(workdir), '<work>');
+	swapped = swapped.replaceAll(workdir, '<work>');
 	const { head, body } = split(swapped);
 	const json = jsonBody(body);
 	const flatBody = json === null ? body.trim() : JSON.stringify(json);
 	const all = mask(`${head ?? ''}\n\n${flatBody}`)
-		.replace(/"(id|payment_id|session|client_secret|secret|cursor|next_before|next_cursor)":\s*"(cs_|whsec_)?[^"]*?"/g, '"$1":"<id>"')
+		.replace(/"(id|payment_id|session|client_secret|secret|cursor|next_before|next_cursor|idempotency_key)":\s*"(cs_|whsec_)?[^"]*?"/g, '"$1":"<id>"')
+		.replace(/"(generation|next_after)":\s*"[^"]*?"/g, '"$1":"<id>"') // the database's restore generation, sealed cursors
 		.replace(/\bcli_[a-z]+\b/g, 'cli_<key>') // the CLI's generated idempotency keys
-		.replace(/"(created_at|since_beat_ms|finished_at)":\s*\d+/g, '"$1":<n>') // unix seconds, beat ages
-		.replace(/^#\d+/gm, '#<n>') // journal entry numbers
+		.replace(/\bsimnet_[0-9a-f]+\b/g, 'simnet_<ref>') // the simulated network's own operation ref
+		.replace(/\bin \d+m?s\b/g, 'in <n>ms') // npm's "added 1 package … in 128ms"
+		.replace(/"(created_at|since_beat_ms|finished_at|dataset_epoch|from_epoch|to_epoch|archived_payments|now_seconds|seq|expires_in|attempts_left|line_count)":\s*\d+/g, '"$1":<n>')
+		.replace(/^#\d+/gm, '#<n>') // journal entry numbers in the CLI's words
 		.replace(/\b[0-9a-f]{64}\b/g, '<hex64>') // generated keys (openssl rand -hex 32), raw secrets
 		.replace(/"(finished_at|expires_at|created_at|circuit_open_until)":\s*"?\d{4}-?\d\d-?\d\d[^",\s]*"?/g, '"$1":"<time>"')
 		.replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/g, '<uuid>')
@@ -421,6 +424,12 @@ function runAll(steps) {
 		// as differences (the run already failed) instead of crashing on the missing file.
 		const actual = statSync(outFile, { throwIfNoEntry: false }) ? readFileSync(outFile, 'utf8') : '';
 		step.actual = actual;
+		// Masking maps a real credential to its elision on BOTH sides, so a block written before a
+		// mask existed would match while still leaking the secret. The page must never carry one.
+		if (SECRET.test(step.expect.code)) {
+			ok = false;
+			console.error(`snippets: ${relative(ROOT, step.file)}: an output block carries an unmasked credential — write ${'sk|whsec|cs'}_sim_… instead`);
+		}
 		if (!matches(actual, step.expect)) {
 			ok = false;
 			console.error(`\nsnippets: ${relative(ROOT, step.file)}: the output differs from the page for:\n${step.code}\n--- the page (normalised)\n${normalise(step.expect.code)}\n--- the server (normalised)\n${normalise(actual)}\n`);

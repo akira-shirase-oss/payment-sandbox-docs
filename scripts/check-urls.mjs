@@ -26,7 +26,7 @@ const EXAMPLE = 'https://sandbox.example.com';
 // PS_API_URL; the SDK's apiUrl; listen addresses and health checks in self-hosting). Everywhere
 // else is https://sandbox.example.com.
 export const ALLOWED = [
-	/^src\/content\/docs\/(quick-start|cli|sdk)\.mdx$/, // the quick start; the CLI's default --api-url; the SDK's apiUrl
+	/^src\/content\/docs\/(quick-start|payments|ledger|checkout|webhooks|scenarios|cli|sdk)\.mdx$/, // the pages whose examples run on this machine
 	/^src\/content\/docs\/self-hosting\//, // listen addresses, loopback backends, local health checks
 	/^src\/pages\/api\/reference\.astro$/, // the reference's "the quick start on this machine" server
 ];
