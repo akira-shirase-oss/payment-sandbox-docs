@@ -1,0 +1,101 @@
+---
+title: The TypeScript SDK
+description: "'@sandbox/sdk' — a test store's client: payments with safe retries and honest uncertain outcomes, plus webhook verification."
+---
+
+:::caution[Simulated money only]
+The SDK only ever talks to the simulated stack — it refuses a key that is not `sk_sim_…` and
+a host that is not this machine (unless you explicitly allow it).
+:::
+
+`@sandbox/sdk` is the TypeScript client a test store's server uses: payments with safe
+retries, checkout sessions, webhook endpoints and signature verification, balances and
+reconciliation. Node 22.17 or later.
+
+## Install from the repository
+
+The package is not on npm — a store installs it from the cloned product repository:
+
+```sh run=sdk
+mkdir -p my-store && cd my-store
+npm init -y > /dev/null
+npm install ../packages/sdk-ts
+```
+
+```text output=sdk match=lines
+
+added 1 package, and audited 3 packages in 178ms
+
+found 0 vulnerabilities
+```
+
+## Configuration it refuses
+
+The constructor is where the sandbox-only contract lives. Anything that looks like a real
+integration is refused before a request exists: a key that isn't `sk_sim_…`, a real
+processor's host, `NODE_ENV=production`, a non-loopback host without `allowNonLocal`, plain
+`http://` off this machine without `allowPlainHttp`:
+
+```sh run=sdk
+node --input-type=module -e "
+import { Sandbox } from '@sandbox/sdk';
+try {
+  new Sandbox({ apiUrl: 'https://api.stripe.com', apiKey: 'sk_sim_' + '0'.repeat(64) });
+} catch (error) {
+  console.log('refused:', error.constructor.name);
+}
+"
+```
+
+```text output=sdk
+refused: ConfigError
+```
+
+## A store's flow
+
+Retries are safe by construction: every money-moving call carries an idempotency key, every
+retry reuses it, at most 4 attempts inside a 30 s deadline. And outcomes are honest —
+`outcome: 'uncertain'` is not a success, and `UnknownOutcomeError` names the key to retry
+with:
+
+```js run=sdk file=store.mjs
+import { Sandbox } from '@sandbox/sdk';
+
+const sandbox = new Sandbox({ apiUrl: 'http://127.0.0.1:56080', apiKey: process.env.PS_API_KEY });
+console.log((await sandbox.notice()).notice);
+
+const hold = await sandbox.payments.create({ amount: 1800, currency: 'USD', description: 'Order 3003' });
+console.log(`hold ${hold.payment.id}: ${hold.outcome}`);
+
+const settled = hold.settled ? hold : await sandbox.payments.waitForSettlement(hold.payment.id);
+console.log(`settled: ${settled.payment.status}`);
+
+const captured = await sandbox.payments.capture(hold.payment.id, 1800);
+console.log(`capture: ${captured.outcome}`);
+
+const refund = await sandbox.payments.refund(hold.payment.id, 600);
+console.log(`refund: ${refund.outcome}, status ${refund.payment.status}`);
+
+const { clean } = await sandbox.reconciliation({ network: true });
+console.log(`reconciliation clean: ${clean}`);
+```
+
+```sh run=sdk
+node store.mjs
+```
+
+```text output=sdk
+SIMULATED MONEY ONLY: Payment Sandbox moves no real money and accepts no real cards.
+hold 82b42962-e6d1-530b-ad13-69f07af74fad: succeeded
+settled: authorized
+capture: succeeded
+refund: succeeded, status partially_refunded
+reconciliation clean: true
+```
+
+`payments.waitForSettlement` polls until no operation is `pending` or `uncertain` — the same
+settle path `payments wait` uses on the CLI. The same object covers
+`checkout.create`/`waitForPayment`, `webhooks.create`/`rotate`/`disable`, `balances()`,
+`events()` and `resetDataset()` — and for inbound deliveries, `verifyWebhook({ body,
+headers, secrets })` checks the 300 s window and every active signing secret before your
+handler parses a thing (see [Webhooks](/webhooks/)).

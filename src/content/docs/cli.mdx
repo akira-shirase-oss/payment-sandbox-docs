@@ -1,0 +1,141 @@
+---
+title: The CLI
+description: sandbox-cli — the whole API from a terminal, with honest exit statuses and safe retries built in.
+---
+
+:::caution[Simulated money only]
+Everything `sandbox-cli` does here is against the simulated stack: it prints
+`SIMULATED MONEY ONLY` on every run and refuses a key that is not `sk_sim_…`.
+:::
+
+`sandbox-cli` covers the whole API — payments, the ledger, checkout sessions, webhooks,
+events, the scenario library and dataset resets — with the exit status saying what really
+happened. It reads `PS_API_URL` (default `http://127.0.0.1:56080`) and `PS_API_KEY` from the
+environment; `--json` prints the API's own JSON instead of words.
+
+## Guardrails first
+
+The CLI is the first place the sandbox-only contract is enforced: a key that isn't
+`sk_sim_…` is refused before anything is sent, a real processor's host is refused, a
+non-loopback `--api-url` needs `--allow-non-local`, and plain `http://` to a remote host
+needs `--allow-plain-http`. `--ca-cert` trusts a private CA for a self-hosted sandbox.
+
+## Payments, inspected
+
+```sh run=cli
+cargo run -q -p sandbox-cli -- payments list --limit 3
+```
+
+```text output=cli
+d5fd2147-8446-5fd7-8338-5b988faac7a4       19.99 USD  captured
+ec4894c7-0d15-5cd1-948a-34e17e7e9d1d       19.99 USD  declined
+2782ba37-5600-5a79-ba91-4acb8f991325        9.00 USD  authorized
+```
+
+```sh run=cli
+id=$(cargo run -q -p sandbox-cli -- --json payments list --limit 1 | jq -r '.payments[0].id')
+cargo run -q -p sandbox-cli -- payments get "$id"
+```
+
+```text output=cli
+payment d5fd2147-8446-5fd7-8338-5b988faac7a4  19.99 USD  status captured
+authorized 19.99 USD  captured 19.99 USD  voided 0.00 USD  refunded 0.00 USD
+  authorize      19.99 USD  succeeded
+  capture        19.99 USD  succeeded
+```
+
+## The books
+
+```sh run=cli
+cargo run -q -p sandbox-cli -- ledger balances
+```
+
+```text output=cli
+USD merchant_pending               159.99
+USD payer_funding                  175.99
+USD payer_held                      16.00
+```
+
+```sh run=cli
+cargo run -q -p sandbox-cli -- ledger journal "$id"
+```
+
+```text output=cli
+#8902 authorize USD
+    payer_funding        1999
+    payer_held           -1999
+#8904 capture USD
+    payer_held           1999
+    merchant_pending     -1999
+```
+
+## Checkout, webhooks and events
+
+```sh run=cli
+cargo run -q -p sandbox-cli -- checkout create --amount 5.00 --currency USD --description "A coffee"
+```
+
+```text output=cli
+checkout 01a1f3a4-f89d-7319-adeb-1099f06e8acb for 5.00 USD created; send the payer to:
+http://127.0.0.1:56083/c/01a1f3a4-f89d-7319-adeb-1099f06e8acb#cs_sim_…
+(the link holds the session's secret, shown once: give it to the payer only)
+```
+
+```sh run=cli
+cargo run -q -p sandbox-cli -- webhooks list
+cargo run -q -p sandbox-cli -- events --limit 5
+```
+
+```text output=cli
+01a1f3a4-d089-70d6-b8aa-3cae64e49c9f  http://127.0.0.1:56100/webhooks  disabled, two secrets sign (rotating)
+d5fd2147-8446-5fd7-8338-5b988faac7a4  #2 capture.succeeded        no endpoint
+d5fd2147-8446-5fd7-8338-5b988faac7a4  #1 authorize.succeeded      no endpoint
+ec4894c7-0d15-5cd1-948a-34e17e7e9d1d  #1 authorize.declined       no endpoint
+2782ba37-5600-5a79-ba91-4acb8f991325  #1 authorize.succeeded      delivered after 1 attempt(s)
+0e789ac1-17d5-570c-a0e4-45802f097a2b  #2 capture.succeeded        no endpoint
+```
+
+## Exit statuses tell the truth
+
+| Exit | `Ended` | Meaning |
+|---|---|---|
+| `0` | done | The operation succeeded (or the read finished). |
+| `1` | refused | The API refused — an auth, scope or validation error. |
+| `2` | usage | Bad input: a non-`sk_sim_` key, a bad amount, an unknown scenario. |
+| `3` | declined | The simulated network declined, or refused to execute. |
+| `4` | uncertain | The answer is not known — check before retrying or fulfilling. |
+| `5` | unreachable | The API could not be reached at all. |
+
+`--idempotency-key` reuses a key to retry a request whose answer you lost — the same key,
+never a fresh one.
+
+## A clean slate: dataset reset
+
+`reset` archives the project's whole dataset and opens a new, empty epoch — nothing is
+deleted, but the reset needs the project's slug typed as confirmation (without `--confirm`
+it asks interactively):
+
+```sh run=cli
+cargo run -q -p sandbox-cli -- --json reset --confirm my-store
+```
+
+```json output=cli
+{
+  "project": {
+    "dataset_epoch": 2,
+    "id": "01a1f3a4-a804-74fb-9e8a-c24a9a03c176",
+    "name": "My store",
+    "slug": "my-store"
+  },
+  "reset": {
+    "archived_payments": 9,
+    "from_epoch": 1,
+    "note": "nothing was deleted: the earlier epoch's journal, payments and events are archived",
+    "to_epoch": 2
+  },
+  "simulated": true
+}
+```
+
+The earlier epochs' journals, payments and events stay archived; the project's keys keep
+working against the new epoch.

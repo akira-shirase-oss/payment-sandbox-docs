@@ -74,6 +74,13 @@ export default defineConfig({
 						{ label: 'Failure scenarios', slug: 'scenarios' },
 					],
 				},
+				{
+					label: 'Reference',
+					items: [
+						{ label: 'The CLI', slug: 'cli' },
+						{ label: 'The TypeScript SDK', slug: 'sdk' },
+					],
+				},
 				{ label: 'API reference', link: '/api/reference/', attrs: { 'data-reference': '' } },
 				{ label: 'Changelog', link: '/changelog/' },
 			],
