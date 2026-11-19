@@ -25,6 +25,7 @@ git clone https://github.com/akira-shirase-oss/payment-sandbox
 cd payment-sandbox
 # On macOS with rustup from Homebrew, the pinned toolchain needs:
 #   export PATH="$(brew --prefix rustup)/bin:$PATH"
+cargo build
 ```
 
 ## 2. PostgreSQL, then the schema
@@ -37,7 +38,7 @@ server and tests read — the database URLs, the `dev` profile and the local cre
 scripts/stack.sh up && eval "$(scripts/stack.sh env)"
 ```
 
-```text output=quickstart
+```text output=quickstart match=lines
 stack ok: postgres on 127.0.0.1:56432, the restore cluster on 127.0.0.1:56450
 ```
 
@@ -77,9 +78,26 @@ curl -s http://127.0.0.1:56080/readyz
 
 ```json output=quickstart
 {
+  "simulated": true,
   "status": "ready",
-  "tasks": {},
-  "simulated": true
+  "tasks": [
+    {
+      "last_failure": null,
+      "name": "deliverer",
+      "restarts": 0,
+      "running": true,
+      "since_beat_ms": 207,
+      "stale": false
+    },
+    {
+      "last_failure": null,
+      "name": "reconciler",
+      "restarts": 0,
+      "running": true,
+      "since_beat_ms": 973,
+      "stale": false
+    }
+  ]
 }
 ```
 
@@ -98,8 +116,22 @@ export PS_API_KEY=$(jq -r .api_key.secret <<<"$project")
 
 ```json output=quickstart
 {
-  "project": {},
-  "api_key": {}
+  "api_key": {
+    "id": "01a1f1de-783b-70f5-b86a-f53331c11afa",
+    "note": "shown once; only its SHA-256 is stored",
+    "prefix": "sk_sim_…",
+    "scopes": [
+      "admin"
+    ],
+    "secret": "sk_sim_…"
+  },
+  "project": {
+    "dataset_epoch": 1,
+    "id": "01a1f1de-783b-70f5-b86a-f53275c4166a",
+    "name": "My store",
+    "slug": "my-store"
+  },
+  "simulated": true
 }
 ```
 
@@ -112,7 +144,8 @@ cargo run -q -p sandbox-cli -- status
 ```
 
 ```text output=quickstart
-…
+Payment Sandbox at http://127.0.0.1:56080 (ledger semantics v1)
+Project My store (my-store), dataset epoch 1
 ```
 
 A purchase: hold 42.00 (USD 42.00 — amounts are integer minor units), capture it, refund 12.00:
@@ -123,7 +156,9 @@ cargo run -q -p sandbox-cli -- payments capture "$payment" --amount 42.00
 ```
 
 ```text output=quickstart
-…
+capture of 42.00 USD succeeded
+payment ee272a06-019f-5ec6-9d83-79865fa38e57  status captured
+Idempotency-Key cli_pkhimdheklkknbfagjcfmfjhceeiflka: to retry this request, reuse it with --idempotency-key
 ```
 
 ```sh run=quickstart
@@ -131,7 +166,9 @@ cargo run -q -p sandbox-cli -- payments refund "$payment" --amount 12.00
 ```
 
 ```text output=quickstart
-…
+refund of 12.00 USD succeeded
+payment ee272a06-019f-5ec6-9d83-79865fa38e57  status partially_refunded
+Idempotency-Key cli_oeljanhcdceagjnokmkdmdnikoafjcaf: to retry this request, reuse it with --idempotency-key
 ```
 
 ## 7. The books balance, provably
@@ -144,7 +181,9 @@ cargo run -q -p sandbox-cli -- ledger explain USD merchant_pending
 ```
 
 ```text output=quickstart
-…
+#8822 capture             -42.00  running           -42.00
+#8824 refund               12.00  running           -30.00
+Explained: the lines sum to the balance, 30.00 USD (journal sign -30.00: debits +, credits -).
 ```
 
 ```sh run=quickstart
@@ -152,29 +191,69 @@ cargo run -q -p sandbox-cli -- reconcile
 ```
 
 ```text output=quickstart
-…
+Clean: every balance equals the sum of its journal entries, and every payment its entries.
+payments checked 1, journal entries checked 3, open operations 0
 ```
 
 ## 8. A reply that was lost
 
-`tok_sim_lost_reply` makes the network approve and the reply vanish. Exit status `4` means
-**not known yet** — never "paid" — until `payments wait` (or the reconciler) settles it:
+`tok_sim_lost_reply` makes the network approve and the reply vanish. The CLI prints the operation it
+committed and exits `4` — **not known yet**, never "paid" — until `payments wait` (or the reconciler)
+settles it:
 
 ```sh run=quickstart exit=4
-lost=$(cargo run -q -p sandbox-cli -- --json payments create --amount 7.00 --currency USD --scenario lost_reply)
-echo "$lost" | jq .
+cargo run -q -p sandbox-cli -- --json payments create --amount 7.00 --currency USD --scenario lost_reply | tee lost.json
 ```
 
 ```json output=quickstart
-…
+{
+  "operation": {
+    "amount": 700,
+    "attempts": 1,
+    "decline_code": null,
+    "id": "e85b704f-0c18-5a77-bba1-babffc627a0d",
+    "idempotency_key": "cli_kbcemclljnphdiglgcmjefakdepfnfom",
+    "kind": "authorize",
+    "network_ref": null,
+    "state": "uncertain"
+  },
+  "payment": {
+    "amount": 700,
+    "authorize_operation_id": "e85b704f-0c18-5a77-bba1-babffc627a0d",
+    "authorized": 0,
+    "capturable": 0,
+    "captured": 0,
+    "created_at": 1795059255,
+    "currency": "USD",
+    "decline_code": null,
+    "description": null,
+    "id": "08666040-45f4-5952-b858-1e017c22799e",
+    "refundable": 0,
+    "refunded": 0,
+    "reserved": {
+      "capture": 0,
+      "refund": 0,
+      "void": 0
+    },
+    "simulated": true,
+    "status": "authorizing",
+    "token": "tok_sim_lost_reply",
+    "voided": 0
+  },
+  "replayed": false,
+  "simulated": true
+}
 ```
 
 ```sh run=quickstart
-cargo run -q -p sandbox-cli -- payments wait "$(jq -r .payment.id <<<"$lost")"
+cargo run -q -p sandbox-cli -- payments wait "$(jq -r .payment.id lost.json)"
 ```
 
 ```text output=quickstart
-…
+Nothing of it is open any more.
+payment 08666040-45f4-5952-b858-1e017c22799e  7.00 USD  status authorized
+authorized 7.00 USD  captured 0.00 USD  voided 0.00 USD  refunded 0.00 USD
+  authorize       7.00 USD  succeeded
 ```
 
 ## What's running now
