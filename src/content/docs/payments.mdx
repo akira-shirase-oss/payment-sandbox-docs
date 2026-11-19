@@ -1,0 +1,293 @@
+---
+title: Payments
+description: Holds, captures, voids and refunds against the simulated network — idempotent, capacity-safe, honest about uncertainty.
+---
+
+:::caution[Simulated money only]
+Every payment on this page is simulated: no real money moves, no real card exists, and the
+amounts below are holds on a ledger inside a test tool.
+:::
+
+A payment starts as a **hold** — money reserved, not moved. You then capture it (all at once
+or in parts), void what remains, or refund what was captured. The API runs locally at
+`http://127.0.0.1:56080` on this machine; everywhere else it would be your sandbox's URL.
+
+## Authorize a hold
+
+`POST /v1/payments` takes an amount in minor units, a currency, a network token (`tok_sim_…`
+picks the scenario the simulated network acts out) and an `Idempotency-Key`:
+
+```sh run=payments
+key="docs_$(openssl rand -hex 6)"
+answer=$(curl -s -X POST http://127.0.0.1:56080/v1/payments \
+  -H "Authorization: Bearer $PS_API_KEY" -H 'Content-Type: application/json' \
+  -H "Idempotency-Key: $key" \
+  -d '{"amount": 4500, "currency": "USD", "token": "tok_sim_approve", "description": "Order 1002"}')
+echo "$answer" | jq .
+hold=$(jq -r .payment.id <<<"$answer")
+```
+
+```json output=payments
+{
+  "operation": {
+    "amount": 4500,
+    "attempts": 1,
+    "decline_code": null,
+    "id": "71db3acd-2b32-5cfd-b6da-848c02a4c770",
+    "idempotency_key": "docs_daf25558a048",
+    "kind": "authorize",
+    "network_ref": "simnet_18771b2ce67c3ffb47cc",
+    "state": "succeeded"
+  },
+  "payment": {
+    "amount": 4500,
+    "authorize_operation_id": "71db3acd-2b32-5cfd-b6da-848c02a4c770",
+    "authorized": 4500,
+    "capturable": 4500,
+    "captured": 0,
+    "created_at": 1795089161,
+    "currency": "USD",
+    "decline_code": null,
+    "description": "Order 1002",
+    "id": "6d43f40f-9cf7-5d00-923a-926a77845ecc",
+    "refundable": 0,
+    "refunded": 0,
+    "reserved": {
+      "capture": 0,
+      "refund": 0,
+      "void": 0
+    },
+    "simulated": true,
+    "status": "authorized",
+    "token": "tok_sim_approve",
+    "voided": 0
+  },
+  "replayed": false,
+  "simulated": true
+}
+```
+
+The hold is on the books: `authorized` 45.00, `capturable` 45.00, nothing moved yet.
+
+## The idempotency key is the retry
+
+Send the identical request again — the key and the payload byte-for-byte — and the recorded
+answer comes back instead of a second hold:
+
+```sh run=payments
+curl -s -X POST http://127.0.0.1:56080/v1/payments \
+  -H "Authorization: Bearer $PS_API_KEY" -H 'Content-Type: application/json' \
+  -H "Idempotency-Key: $key" \
+  -d '{"amount": 4500, "currency": "USD", "token": "tok_sim_approve", "description": "Order 1002"}' | jq '{replayed, payment: .payment.id}'
+```
+
+```json output=payments
+{
+  "replayed": true,
+  "payment": "b196bab1-6b6b-51df-b255-05531f03ccc1"
+}
+```
+
+The same key with a **different** payload is not a retry — it is a conflict, answered
+`409` rather than silently reinterpreted:
+
+```sh run=payments
+curl -s -X POST http://127.0.0.1:56080/v1/payments \
+  -H "Authorization: Bearer $PS_API_KEY" -H 'Content-Type: application/json' \
+  -H "Idempotency-Key: $key" \
+  -d '{"amount": 4600, "currency": "USD", "token": "tok_sim_approve"}' | jq .
+```
+
+```json output=payments
+{
+  "error": {
+    "code": "idempotency_key_conflict",
+    "message": "this Idempotency-Key was already used with a different request; it is never reinterpreted",
+    "request_id": "01a1f3a4-ce15-7648-997d-063c61af53f7"
+  },
+  "simulated": true
+}
+```
+
+## Capture, in parts if you like
+
+Each capture carries its own idempotency key and takes up to the remaining hold — here
+30.00 of the 45.00:
+
+```sh run=payments
+curl -s -X POST "http://127.0.0.1:56080/v1/payments/$hold/captures" \
+  -H "Authorization: Bearer $PS_API_KEY" -H 'Content-Type: application/json' \
+  -H "Idempotency-Key: docs_$(openssl rand -hex 6)" \
+  -d '{"amount": 3000}' | jq '{payment: .payment.id, status: .payment.status, captured: .payment.captured, capturable: .payment.capturable, operation: .operation.state}'
+```
+
+```json output=payments
+{
+  "payment": "b196bab1-6b6b-51df-b255-05531f03ccc1",
+  "status": "partially_captured",
+  "captured": 3000,
+  "capturable": 1500,
+  "operation": "succeeded"
+}
+```
+
+Capturing more than the authorized remainder cannot overrun — the excess fails
+transactionally instead of queueing:
+
+```sh run=payments
+curl -s -X POST "http://127.0.0.1:56080/v1/payments/$hold/captures" \
+  -H "Authorization: Bearer $PS_API_KEY" -H 'Content-Type: application/json' \
+  -H "Idempotency-Key: docs_$(openssl rand -hex 6)" \
+  -d '{"amount": 2000}' | jq .
+```
+
+```json output=payments
+{
+  "error": {
+    "code": "insufficient_capacity",
+    "message": "requested 2000 minor units, but only 1500 remain; the excess is refused",
+    "request_id": "01a1f3a4-ce65-76ba-9619-55fd13b5d3f4"
+  },
+  "simulated": true
+}
+```
+
+## Void releases what is left
+
+The uncaptured remainder goes back with `POST …/void` — an empty body, still with its own
+key:
+
+```sh run=payments
+curl -s -X POST "http://127.0.0.1:56080/v1/payments/$hold/void" \
+  -H "Authorization: Bearer $PS_API_KEY" -H 'Content-Type: application/json' \
+  -H "Idempotency-Key: docs_$(openssl rand -hex 6)" \
+  -d '{}' | jq '{status: .payment.status, captured: .payment.captured, voided: .payment.voided}'
+```
+
+```json output=payments
+{
+  "status": "captured",
+  "captured": 3000,
+  "voided": 1500
+}
+```
+
+## Refund — bounded by what was captured
+
+A second hold, captured in full, shows the refund side. Refunds are capped by the captured
+remainder the same way captures are capped by the hold:
+
+```sh run=payments
+answer=$(curl -s -X POST http://127.0.0.1:56080/v1/payments \
+  -H "Authorization: Bearer $PS_API_KEY" -H 'Content-Type: application/json' \
+  -H "Idempotency-Key: docs_$(openssl rand -hex 6)" \
+  -d '{"amount": 2000, "currency": "USD", "token": "tok_sim_approve"}')
+refundable=$(jq -r .payment.id <<<"$answer")
+curl -s -X POST "http://127.0.0.1:56080/v1/payments/$refundable/captures" \
+  -H "Authorization: Bearer $PS_API_KEY" -H 'Content-Type: application/json' \
+  -H "Idempotency-Key: docs_$(openssl rand -hex 6)" \
+  -d '{"amount": 2000}' | jq -r .payment.status
+curl -s -X POST "http://127.0.0.1:56080/v1/payments/$refundable/refunds" \
+  -H "Authorization: Bearer $PS_API_KEY" -H 'Content-Type: application/json' \
+  -H "Idempotency-Key: docs_$(openssl rand -hex 6)" \
+  -d '{"amount": 2500}' | jq .error.code
+curl -s -X POST "http://127.0.0.1:56080/v1/payments/$refundable/refunds" \
+  -H "Authorization: Bearer $PS_API_KEY" -H 'Content-Type: application/json' \
+  -H "Idempotency-Key: docs_$(openssl rand -hex 6)" \
+  -d '{"amount": 500}' | jq '{status: .payment.status, refunded: .payment.refunded, refundable: .payment.refundable}'
+```
+
+```text output=payments
+captured
+"insufficient_capacity"
+{
+  "status": "partially_refunded",
+  "refunded": 500,
+  "refundable": 1500
+}
+```
+
+## The card guard
+
+Payment Sandbox has no card fields anywhere — no UI has one and the API has none. A body
+that carries anything card-shaped is rejected **before parsing**, so a raw PAN can never end
+up in a log or a store:
+
+```sh run=payments
+curl -s -X POST http://127.0.0.1:56080/v1/payments \
+  -H "Authorization: Bearer $PS_API_KEY" -H 'Content-Type: application/json' \
+  -H "Idempotency-Key: docs_$(openssl rand -hex 6)" \
+  -d '{"amount": 100, "currency": "USD", "token": "tok_sim_approve", "card": "4242424242424242"}' | jq .
+```
+
+```json output=payments
+{
+  "error": {
+    "code": "raw_card_data_rejected",
+    "message": "raw card data is never accepted; use a tok_sim_* scenario token",
+    "request_id": "01a1f3a4-cf3a-7550-a49f-1c74c27b5170"
+  },
+  "simulated": true
+}
+```
+
+The network's answer to "which card" is the token: `tok_sim_approve`,
+`tok_sim_decline_insufficient_funds`, `tok_sim_decline_do_not_honor`,
+`tok_sim_decline_expired`, `tok_sim_lost_reply`, `tok_sim_unavailable` — each a scenario, not
+a number.
+
+## Reading a payment back
+
+`GET /v1/payments/{id}` returns the payment and every operation on it from one snapshot —
+here the hold we captured and voided above:
+
+```sh run=payments
+curl -s "http://127.0.0.1:56080/v1/payments/$hold" \
+  -H "Authorization: Bearer $PS_API_KEY" | jq '{payment: .payment.status, operations: [.operations[] | {kind, state, amount}]}'
+```
+
+```json output=payments
+{
+  "payment": "captured",
+  "operations": [
+    {
+      "kind": "authorize",
+      "state": "succeeded",
+      "amount": 4500
+    },
+    {
+      "kind": "capture",
+      "state": "succeeded",
+      "amount": 3000
+    },
+    {
+      "kind": "void",
+      "state": "succeeded",
+      "amount": 1500
+    }
+  ]
+}
+```
+
+And `GET /v1/payments` lists the project's payments newest-first, `limit` 1–500 with
+`next_before` paging:
+
+```sh run=payments
+curl -s "http://127.0.0.1:56080/v1/payments?limit=3" \
+  -H "Authorization: Bearer $PS_API_KEY" | jq '{count: (.payments | length), statuses: [.payments[].status], next_before}'
+```
+
+```json output=payments
+{
+  "count": 3,
+  "statuses": [
+    "partially_refunded",
+    "captured",
+    "authorized"
+  ],
+  "next_before": "39834ee4-7b56-57ae-baf1-67f03e29c9b3"
+}
+```
+
+Next: [the journal behind those balances](/ledger/), or [a hosted checkout page](/checkout/)
+for the same hold flow without integration code on the payer side.

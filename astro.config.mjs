@@ -64,6 +64,16 @@ export default defineConfig({
 						{ label: 'Concepts', slug: 'concepts' },
 					],
 				},
+				{
+					label: 'Guides',
+					items: [
+						{ label: 'Payments', slug: 'payments' },
+						{ label: 'The ledger', slug: 'ledger' },
+						{ label: 'Hosted checkout', slug: 'checkout' },
+						{ label: 'Webhooks', slug: 'webhooks' },
+						{ label: 'Failure scenarios', slug: 'scenarios' },
+					],
+				},
 				{ label: 'API reference', link: '/api/reference/', attrs: { 'data-reference': '' } },
 				{ label: 'Changelog', link: '/changelog/' },
 			],

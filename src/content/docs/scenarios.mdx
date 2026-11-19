@@ -1,0 +1,141 @@
+---
+title: Failure scenarios
+description: The seeded scenario library and the simulator's test controls — every way a payment link fails, rehearsed on demand.
+---
+
+:::caution[Simulated money only]
+Every failure on this page is rehearsed against a simulated network — no real money, no real
+cards, no real payment rails anywhere.
+:::
+
+A real integration fails in ways a happy-path test never reaches: declined holds, expired
+instruments, replies that vanish, a network that is down. Payment Sandbox makes each one a
+button: the **scenario token** picks what the simulated network acts out, and the seeded
+**scenario library** runs whole failure stories end to end.
+
+## The network tokens
+
+Every money-moving call takes `tok_sim_<scenario>`:
+
+| Token | The network does |
+|---|---|
+| `tok_sim_approve` | Approves. |
+| `tok_sim_decline_insufficient_funds` | Declines, with a reason. |
+| `tok_sim_decline_do_not_honor` | Declines without one. |
+| `tok_sim_decline_expired` | Declines the (pretend) instrument as expired. |
+| `tok_sim_lost_reply` | Executes and records — then holds the reply past your deadline. `uncertain` until readback. |
+| `tok_sim_unavailable` | Answers 503 without executing: `not_executed`, never money. |
+
+## The seeded library
+
+The CLI ships named multi-step stories — `scenarios list` shows them:
+
+```sh run=scenarios
+cargo run -q -p sandbox-cli -- scenarios list
+```
+
+```text output=scenarios
+purchase                     The first useful release: a 42.00 USD purchase approved, captured in full and partly refunded.
+decline-insufficient-funds   The network declines for insufficient funds; nothing is held, and a capture of the declined payment is refused.
+decline-then-approve         A payer's first attempt is declined (do not honor); a second payment is approved and captured.
+expired-payment-method       An expired payment method is declined, and repeating the same request replays the decline instead of trying again.
+lost-reply                   The network approves but its reply is lost: the authorization stays uncertain until the reconciler reads the record back, then it is captured.
+network-unavailable          The network is unavailable: the authorization stays uncertain until a fenced readback proves it never ran; repeating it replays that, and a new payment goes through.
+partial-capture-then-void    A 100.00 hold is captured for 60.00, the remaining 40.00 is voided, and 10.00 is refunded.
+refund-capacity              Refunds of 20.00 and 30.00 use up a 50.00 capture; one more cent is refused, never overrun.
+idempotent-retry             A request repeated under its key replays the first answer; the same key with another amount is a conflict, never a reinterpretation.
+capture-over-authorization   Capturing more than was authorized is refused; capturing the authorized amount succeeds.
+currencies                   Zero- and three-decimal currencies post exact minor units: 500 JPY and 1.250 KWD, each captured and partly refunded.
+```
+
+`scenarios show` prints one story's steps:
+
+```sh run=scenarios
+cargo run -q -p sandbox-cli -- scenarios show lost-reply
+```
+
+```text output=scenarios
+{
+  "name": "lost-reply",
+  "summary": "The network approves but its reply is lost: the authorization stays uncertain until the reconciler reads the record back, then it is captured.",
+  "steps": [
+    {
+      "do": "authorize",
+      "payment": "order",
+      "amount": 3000,
+      "currency": "EUR",
+      "scenario": "lost_reply"
+    },
+    {
+      "do": "wait",
+      "payment": "order"
+    },
+    {
+      "do": "capture",
+      "payment": "order",
+      "amount": 3000
+    }
+  ]
+}
+```
+
+## Run one for real
+
+`scenarios run` executes the steps against the live sandbox and prints the trace;
+`--check` also diffs it against the trace committed in the product and fails the run on any
+difference — this page's example is the product's own regression test:
+
+```sh run=scenarios
+cargo run -q -p sandbox-cli -- scenarios run decline-then-approve --check
+```
+
+```text output=scenarios
+decline-then-approve: A payer's first attempt is declined (do not honor); a second payment is approved and captured.
+   1 authorize first      201 declined                           payment declined
+   2 authorize second     201 succeeded                          payment authorized
+   3 capture   second     201 succeeded                          payment captured
+  first: declined — 1 event(s), 0 journal entries
+  second: captured — 2 event(s), 2 journal entries
+  matches the library's expected trace
+```
+
+`scenarios run --all --check` exercises the whole library; `--file` runs a scenario of your
+own from JSON.
+
+## The test control plane
+
+In the `dev` profile the simulator mounts operator controls on its own port, behind
+`PS_SIM_CONTROL_TOKEN` — they do not exist outside dev. The **virtual clock** drives
+time-dependent behavior without waiting; posted journal history never moves under it:
+
+```sh run=scenarios
+curl -s http://127.0.0.1:56081/v1/clock \
+  -H "Authorization: Bearer $PS_SIM_CONTROL_TOKEN"
+curl -s -X POST http://127.0.0.1:56081/v1/clock \
+  -H "Authorization: Bearer $PS_SIM_CONTROL_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"seconds": 86400}'
+```
+
+```text output=scenarios
+{"now_seconds":1767225600,"simulated":true}{"now_seconds":1767312000,"simulated":true}
+```
+
+And **fault rules** shape failures by kind or by target operation — at most `count` times,
+up to 64 rules. `delay` makes a slow network, `lost_reply` eats a reply, `unavailable` takes
+the network down:
+
+```sh run=scenarios
+curl -s -X POST http://127.0.0.1:56081/v1/faults \
+  -H "Authorization: Bearer $PS_SIM_CONTROL_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"action": "delay", "delay_ms": 750, "count": 1}'
+curl -s -X DELETE http://127.0.0.1:56081/v1/faults \
+  -H "Authorization: Bearer $PS_SIM_CONTROL_TOKEN"
+```
+
+```text output=scenarios
+{"added":true}{"cleared":true}
+```
+
+The same stories on the API's side: [payments](/payments/) for the token-driven declines,
+and [the quick start's lost reply](/quick-start/#8-a-reply-that-was-lost) for `uncertain`
+settled by `payments wait`.

@@ -1,0 +1,185 @@
+---
+title: Webhooks
+description: Signed, at-least-once event deliveries to loopback receivers — verify, deduplicate, re-read the payment.
+---
+
+:::caution[Simulated money only]
+The events on this page describe simulated payments — no real money moved and no real card
+was involved in producing them.
+:::
+
+When an operation resolves, Payment Sandbox emits an **event** and delivers it to every
+registered endpoint. Delivery is **at least once** and can arrive out of order — that is the
+honest contract, not a bug: your receiver verifies the signature, deduplicates by event id,
+and re-reads the payment before fulfilling. Deliveries go only to **loopback** receivers on
+ports `PS_WEBHOOK_PORTS` allows.
+
+## A receiver that verifies first
+
+This one checks `Sandbox-Signature` (`t=<unix>,v1=<hmac>`) against the raw body — the signed
+payload is `<event id>.<timestamp>.<body>` — before it trusts a word, and it counts repeat
+deliveries of an event it already saw:
+
+```js run=webhooks file=webhook-receiver.mjs
+import { createHmac, timingSafeEqual } from 'node:crypto';
+import http from 'node:http';
+
+const secret = process.env.WHSEC;
+const seen = new Set();
+http.createServer((req, res) => {
+	if (req.method !== 'POST') return res.writeHead(405).end();
+	let body = '';
+	req.on('data', (chunk) => (body += chunk));
+	req.on('end', () => {
+		const signature = req.headers['sandbox-signature'] ?? '';
+		const eventId = req.headers['sandbox-event-id'] ?? '';
+		const t = signature.match(/t=(\d+)/)?.[1];
+		const v1 = signature.match(/v1=([0-9a-f]{64})/)?.[1];
+		const expected = createHmac('sha256', secret).update(`${eventId}.${t}.`).update(body).digest('hex');
+		const ok = v1 !== undefined && timingSafeEqual(Buffer.from(v1, 'hex'), Buffer.from(expected, 'hex'));
+		const event = JSON.parse(body);
+		const verdict = ok ? (seen.has(event.id) ? 'duplicate' : 'verified') : 'BAD SIGNATURE';
+		if (ok) seen.add(event.id);
+		console.log(`${verdict} ${event.id} ${event.kind}`);
+		res.writeHead(ok ? 200 : 400).end();
+	});
+}).listen(56100, '127.0.0.1');
+```
+
+## Register the endpoint, then start listening
+
+`POST /v1/webhook_endpoints` answers the endpoint and its signing secret, `whsec_sim_…`,
+shown once (the server stores it sealed):
+
+```sh run=webhooks
+endpoint=$(curl -s -X POST http://127.0.0.1:56080/v1/webhook_endpoints \
+  -H "Authorization: Bearer $PS_API_KEY" -H 'Content-Type: application/json' \
+  -d '{"url": "http://127.0.0.1:56100/webhooks"}')
+echo "$endpoint" | jq '{endpoint: .endpoint.id, url: .endpoint.url, secret}'
+export WHSEC=$(jq -r .secret <<<"$endpoint")
+endpoint_id=$(jq -r .endpoint.id <<<"$endpoint")
+```
+
+```json output=webhooks
+{
+  "endpoint": "01a1f3a4-d089-70d6-b8aa-3cae64e49c9f",
+  "url": "http://127.0.0.1:56100/webhooks",
+  "secret": "whsec_sim_…"
+}
+```
+
+```sh run=webhooks
+node webhook-receiver.mjs > receiver.log 2>&1 &
+for i in $(seq 30); do curl -s -o /dev/null http://127.0.0.1:56100/ 2>/dev/null && break; sleep 0.2; done
+```
+
+## Make an event
+
+Any resolved operation produces one — an authorize will do:
+
+```sh run=webhooks
+payment=$(curl -s -X POST http://127.0.0.1:56080/v1/payments \
+  -H "Authorization: Bearer $PS_API_KEY" -H 'Content-Type: application/json' \
+  -H "Idempotency-Key: wh_$(openssl rand -hex 6)" \
+  -d '{"amount": 900, "currency": "USD", "token": "tok_sim_approve"}' | jq -r .payment.id)
+for i in $(seq 30); do grep -q . receiver.log && break; sleep 0.5; done
+cat receiver.log
+```
+
+```text output=webhooks match=lines
+verified e9ebd23d-033b-5880-8578-abfaac61dd72 undefined
+```
+
+Each line is a delivery the receiver accepted: the event's id, its kind — and `duplicate`
+instead of `verified` the moment the same event arrives twice, which it may.
+
+## Read the server's side
+
+`GET /v1/events` shows each event and the state of its deliveries to every endpoint:
+
+```sh run=webhooks
+curl -s "http://127.0.0.1:56080/v1/events?limit=5" \
+  -H "Authorization: Bearer $PS_API_KEY" | jq '[.events[] | {kind, sequence, deliveries: [.deliveries[] | {endpoint: .[0], state: .[1], attempts: .[2]}]}]'
+```
+
+```json output=webhooks
+[
+  {
+    "kind": "authorize.succeeded",
+    "sequence": 1,
+    "deliveries": [
+      {
+        "endpoint": "01a1f3a4-d089-70d6-b8aa-3cae64e49c9f",
+        "state": "delivered",
+        "attempts": 1
+      }
+    ]
+  },
+  {
+    "kind": "capture.succeeded",
+    "sequence": 2,
+    "deliveries": []
+  },
+  {
+    "kind": "authorize.succeeded",
+    "sequence": 1,
+    "deliveries": []
+  },
+  {
+    "kind": "void.succeeded",
+    "sequence": 3,
+    "deliveries": []
+  },
+  {
+    "kind": "capture.succeeded",
+    "sequence": 2,
+    "deliveries": []
+  }
+]
+```
+
+And `GET /v1/webhook_endpoints` is the health view — `consecutive_failures` and, after too
+many, `circuit_open_until` while the endpoint's circuit stays open:
+
+```sh run=webhooks
+curl -s http://127.0.0.1:56080/v1/webhook_endpoints \
+  -H "Authorization: Bearer $PS_API_KEY" | jq '[.endpoints[] | {id, url, consecutive_failures, circuit_open_until}]'
+```
+
+```json output=webhooks
+[
+  {
+    "id": "01a1f3a4-d089-70d6-b8aa-3cae64e49c9f",
+    "url": "http://127.0.0.1:56100/webhooks",
+    "consecutive_failures": 0,
+    "circuit_open_until": null
+  }
+]
+```
+
+## Rotate, then retire
+
+`POST …/rotate` issues a new secret — shown once — while the old keeps signing for 24 hours,
+so a receiver can carry both during the changeover. `POST …/disable` stops deliveries:
+
+```sh run=webhooks
+curl -s -X POST "http://127.0.0.1:56080/v1/webhook_endpoints/$endpoint_id/rotate" \
+  -H "Authorization: Bearer $PS_API_KEY" | jq '{secret, previous_valid_for_seconds}'
+curl -s -X POST "http://127.0.0.1:56080/v1/webhook_endpoints/$endpoint_id/disable" \
+  -H "Authorization: Bearer $PS_API_KEY" | jq '{id: .endpoint.id, disabled: (.endpoint.disabled_at != null)}'
+```
+
+```json output=webhooks
+{
+  "secret": "whsec_sim_…",
+  "previous_valid_for_seconds": 86400
+}
+{
+  "id": null,
+  "disabled": false
+}
+```
+
+The TypeScript SDK does the verifying for you — `verifyWebhook({ body, headers, secrets })`
+checks the window (300 s) and every active secret before your handler parses anything; see
+[the SDK page](/sdk/).

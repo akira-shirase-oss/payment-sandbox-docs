@@ -1,0 +1,112 @@
+---
+title: Hosted checkout
+description: A payer-facing page on its own origin — create a session, send the payer its link, and read back what happened.
+---
+
+:::caution[Simulated money only]
+The checkout below takes a simulated payment: no real card exists anywhere in it — the payer
+picks a network scenario, never a number — and no real funds move.
+:::
+
+The hosted checkout is the payer-facing half of a payment. Your store creates a
+**checkout session** over the API, sends the payer the link it answers, and the payer
+completes the attempt on the checkout's own origin — page code that never holds payment
+authority and never sees a card field (there isn't one).
+
+## Create a session
+
+`POST /v1/checkout_sessions` takes the amount, a description, where the payer's "Back to the
+store" link lands, and `capture_method` — `automatic` (default: captured the moment the
+network approves) or `manual` (you capture afterwards, as with any hold):
+
+```sh run=checkout
+session=$(curl -s -X POST http://127.0.0.1:56080/v1/checkout_sessions \
+  -H "Authorization: Bearer $PS_API_KEY" -H 'Content-Type: application/json' \
+  -d '{"amount": 2500, "currency": "USD", "description": "Order 2002", "return_url": "http://127.0.0.1:56082/receipt"}')
+echo "$session" | jq '{session: {id: .session.id, state: .session.state, next_action: .session.next_action}, url, client_secret}'
+session_id=$(jq -r .session.id <<<"$session")
+client_secret=$(jq -r .client_secret <<<"$session")
+```
+
+```json output=checkout
+{
+  "session": {
+    "id": "01a1f3a4-d015-7638-9312-e4db95a1f7a5",
+    "state": "open",
+    "next_action": "pay"
+  },
+  "url": "http://127.0.0.1:56083/c/01a1f3a4-d015-7638-9312-e4db95a1f7a5#cs_sim_…",
+  "client_secret": "cs_sim_…"
+}
+```
+
+The answer's `url` is the payer's link — `<checkout origin>/c/<id>#<secret>`, the secret in
+the fragment so it never reaches a server log. `client_secret` is shown once. Send the payer
+to `url`.
+
+## The payer's attempt
+
+On the checkout origin the payer's page picks a scenario and posts it. In a browser that is
+the page's own fetch; for a script the equivalent is one `POST` to
+`/api/sessions/{id}/attempts` — the session's client secret as the bearer, an `Origin`
+matching the checkout's (the attempt API answers only its own origin), an idempotency key,
+and the token:
+
+```sh run=checkout
+curl -s -X POST "http://127.0.0.1:56083/api/sessions/$session_id/attempts" \
+  -H "Authorization: Bearer $client_secret" \
+  -H "Origin: http://127.0.0.1:56083" \
+  -H "Idempotency-Key: att_$(openssl rand -hex 6)" \
+  -H 'Content-Type: application/json' \
+  -d '{"token": "tok_sim_approve"}' | jq '{state: .session.state, attempt: .attempt}'
+```
+
+```json output=checkout
+{
+  "state": "paid",
+  "attempt": {
+    "authorize": "succeeded",
+    "capture": "succeeded",
+    "decline_code": null,
+    "number": 1,
+    "scenario": "tok_sim_approve"
+  }
+}
+```
+
+With `automatic` capture a successful authorize captures at once — the session goes `paid`.
+A declined attempt leaves it `open` for another try (`attempts_left` counts down); a lost
+reply leaves it `uncertain` until the reconciler settles it, and the page's "continue" call
+re-drives the attempt without the key a lost tab may have dropped.
+
+## Read the outcome back
+
+`GET /v1/checkout_sessions/{id}` returns the same view without the secret — the session's
+state, the latest attempt, every attempt with its `payment_id`, and what the payer should do
+next:
+
+```sh run=checkout
+curl -s "http://127.0.0.1:56080/v1/checkout_sessions/$session_id" \
+  -H "Authorization: Bearer $PS_API_KEY" | jq '{state: .session.state, captured, attempts: [.attempts[] | {number, scenario, payment_id}]}'
+```
+
+```json output=checkout
+{
+  "state": "paid",
+  "captured": 2500,
+  "attempts": [
+    {
+      "number": 1,
+      "scenario": "tok_sim_approve",
+      "payment_id": "0e789ac1-17d5-570c-a0e4-45802f097a2b"
+    }
+  ]
+}
+```
+
+Only `paid` — or `authorized`, when `capture_method` was `manual` — is money you may act on:
+fulfil from the payment id, never from the link.
+
+Session expiry is `expires_in` seconds (60–86400, default an hour); `embed_origins` names up
+to four loopback origins allowed to frame the page; `next_action` tells the page what the
+payer sees at every state.

@@ -1,0 +1,217 @@
+---
+title: The ledger
+description: The journal is the only authority — immutable, balanced lines that every balance is derived from and reconciled against.
+---
+
+:::caution[Simulated money only]
+These are simulated ledger entries: no real money moves and no real balance exists — the
+journal below records a test payment inside a development tool.
+:::
+
+The journal is the only authority in Payment Sandbox. Every movement of money posts
+**double-entry lines** — each entry balanced per currency, immutable once written. A
+correction is a reversing entry, never an edit. Balances, payment states and reports are all
+derived views over those lines.
+
+## Balances are derived, never stored
+
+`GET /v1/balances` sums the journal every call — `payer_funding` (what payers gave),
+`payer_held` (holds not yet captured or released), `merchant_pending` (captured, awaiting
+payout) and the rest:
+
+```sh run=ledger
+curl -s http://127.0.0.1:56080/v1/balances \
+  -H "Authorization: Bearer $PS_API_KEY" | jq '.balances[] | select(.currency == "USD")'
+```
+
+```json output=ledger
+{
+  "account": "merchant_pending",
+  "balance": "75.00",
+  "balance_minor": 7500,
+  "currency": "USD",
+  "normal_side": "credit",
+  "signed_minor": -7500
+}
+{
+  "account": "payer_funding",
+  "balance": "82.00",
+  "balance_minor": 8200,
+  "currency": "USD",
+  "normal_side": "debit",
+  "signed_minor": 8200
+}
+{
+  "account": "payer_held",
+  "balance": "7.00",
+  "balance_minor": 700,
+  "currency": "USD",
+  "normal_side": "credit",
+  "signed_minor": -700
+}
+```
+
+## The lines behind a number
+
+Take a 60.00 hold, capture 40.00 of it and void the rest — three movements, three sets of
+journal entries:
+
+```sh run=ledger
+hold=$(curl -s -X POST http://127.0.0.1:56080/v1/payments \
+  -H "Authorization: Bearer $PS_API_KEY" -H 'Content-Type: application/json' \
+  -H "Idempotency-Key: led_$(openssl rand -hex 6)" \
+  -d '{"amount": 6000, "currency": "USD", "token": "tok_sim_approve"}' | jq -r .payment.id)
+curl -s -X POST "http://127.0.0.1:56080/v1/payments/$hold/captures" \
+  -H "Authorization: Bearer $PS_API_KEY" -H 'Content-Type: application/json' \
+  -H "Idempotency-Key: led_$(openssl rand -hex 6)" \
+  -d '{"amount": 4000}' > /dev/null
+curl -s -X POST "http://127.0.0.1:56080/v1/payments/$hold/void" \
+  -H "Authorization: Bearer $PS_API_KEY" -H 'Content-Type: application/json' \
+  -H "Idempotency-Key: led_$(openssl rand -hex 6)" \
+  -d '{}' > /dev/null
+curl -s "http://127.0.0.1:56080/v1/payments/$hold/journal" \
+  -H "Authorization: Bearer $PS_API_KEY" | jq '[.entries[] | {seq, recipe, lines}]'
+```
+
+```json output=ledger
+[
+  {
+    "seq": 8890,
+    "recipe": "authorize",
+    "lines": [
+      [
+        "payer_funding",
+        6000
+      ],
+      [
+        "payer_held",
+        -6000
+      ]
+    ]
+  },
+  {
+    "seq": 8892,
+    "recipe": "capture",
+    "lines": [
+      [
+        "payer_held",
+        4000
+      ],
+      [
+        "merchant_pending",
+        -4000
+      ]
+    ]
+  },
+  {
+    "seq": 8894,
+    "recipe": "void",
+    "lines": [
+      [
+        "payer_held",
+        2000
+      ],
+      [
+        "payer_funding",
+        -2000
+      ]
+    ]
+  }
+]
+```
+
+`GET /v1/payments/{id}/journal` is the payment's whole story: the hold reserving funds, the
+capture moving them to the merchant side, the void releasing the remainder — every line
+balanced per currency.
+
+## Explain any balance
+
+`GET /v1/balances/{currency}/{account}/explain` walks the lines that sum to one balance,
+with running totals and cursor paging (`next.cursor` — a stale or foreign cursor is
+`409`/`400`, so start again rather than guess):
+
+```sh run=ledger
+curl -s "http://127.0.0.1:56080/v1/balances/USD/merchant_pending/explain?limit=5" \
+  -H "Authorization: Bearer $PS_API_KEY" | jq '{lines: [.explanation.lines[] | {seq, recipe, amount_minor, running_minor}], line_count: .explanation.line_count, next: .explanation.next}'
+```
+
+```json output=ledger
+{
+  "lines": [
+    {
+      "seq": 8872,
+      "recipe": "capture",
+      "amount_minor": -4200,
+      "running_minor": -4200
+    },
+    {
+      "seq": 8874,
+      "recipe": "refund",
+      "amount_minor": 1200,
+      "running_minor": -3000
+    },
+    {
+      "seq": 8880,
+      "recipe": "capture",
+      "amount_minor": -3000,
+      "running_minor": -6000
+    },
+    {
+      "seq": 8886,
+      "recipe": "capture",
+      "amount_minor": -2000,
+      "running_minor": -8000
+    },
+    {
+      "seq": 8888,
+      "recipe": "refund",
+      "amount_minor": 500,
+      "running_minor": -7500
+    }
+  ],
+  "line_count": 6,
+  "next": {
+    "cursor": "dadbgbdbggddgbdecngbdidadecndhdegggccndjgfdigbcngddcdegbdjgbdaddgddbdhdgcpdbcpfffdeecpgngfhcgdgigbgohefphagfgogegjgoghhmdhdhdadidididhdadgdbdddcdedfdadfdbdddccodbcodcdhdddfdfdfhmdfdgdadadhdbdkdfdgdadadhdbdkhmdidididihmcndhdfdadajodjajlbbiamimpojkfpkicofmmphfjf"
+  }
+}
+```
+
+The lines always sum to the balance — that is the point of the exercise.
+
+## Reconciliation proves it
+
+`GET /v1/reconciliation` re-derives everything and disagrees with nothing when `clean` is
+true. With `?network=true` it also compares against the simulated network's own records in
+both directions — operations the server has and the network lacks, and vice versa (the
+`uncertain` states surface here until readback settles them):
+
+```sh run=ledger
+curl -s "http://127.0.0.1:56080/v1/reconciliation?network=true" \
+  -H "Authorization: Bearer $PS_API_KEY" | jq '{clean, report, network}'
+```
+
+```json output=ledger
+{
+  "clean": true,
+  "report": {
+    "account_mismatches": [],
+    "entries_checked": 13,
+    "imbalanced_currencies": [],
+    "open_operations": 0,
+    "operation_entry_mismatches": 0,
+    "payment_mismatches": [],
+    "payments_checked": 5
+  },
+  "network": {
+    "complete": true,
+    "disagreements": [],
+    "network_operations_scanned": 13,
+    "unknown_to_network": [],
+    "unknown_to_server": []
+  }
+}
+```
+
+History the journal already posted never changes: not under a clock jump in the simulator,
+not across a crash, not across a restore. Reconciliation is how that promise is checked,
+continuously.
