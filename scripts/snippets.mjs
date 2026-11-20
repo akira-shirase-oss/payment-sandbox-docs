@@ -289,8 +289,10 @@ export function normalise(text) {
 		.replace(/\bcli_[a-z]+\b/g, 'cli_<key>') // the CLI's generated idempotency keys
 		.replace(/\bsimnet_[0-9a-f]+\b/g, 'simnet_<ref>') // the simulated network's own operation ref
 		.replace(/\bin \d+m?s\b/g, 'in <n>ms') // npm's "added 1 package … in 128ms"
-		.replace(/"(created_at|since_beat_ms|finished_at|dataset_epoch|from_epoch|to_epoch|archived_payments|now_seconds|seq|expires_in|attempts_left|line_count)":\s*\d+/g, '"$1":<n>')
+		.replace(/"(created_at|since_beat_ms|finished_at|dataset_epoch|from_epoch|to_epoch|archived_payments|now_seconds|seq|expires_in|attempts_left|line_count|entries_checked|payments_checked|open_operations|operation_entry_mismatches|network_operations_scanned|from|to)":\s*\d+/g, '"$1":<n>')
 		.replace(/^#\d+/gm, '#<n>') // journal entry numbers in the CLI's words
+		.replace(/\bdataset epoch \d+/g, 'dataset epoch <n>') // the epoch ticks up on every reset
+		.replace(/\bledger semantics v\d+/g, 'ledger semantics v<n>')
 		.replace(/\b[0-9a-f]{64}\b/g, '<hex64>') // generated keys (openssl rand -hex 32), raw secrets
 		.replace(/"(finished_at|expires_at|created_at|circuit_open_until)":\s*"?\d{4}-?\d\d-?\d\d[^",\s]*"?/g, '"$1":"<time>"')
 		.replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/g, '<uuid>')

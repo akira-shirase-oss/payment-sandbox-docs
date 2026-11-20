@@ -10,7 +10,8 @@
 //   - internal paths, credentials or tokens
 //   - private IPv4 subnets (10/8, 172.16/12, 192.168/16) — they would leak the author's network.
 //     Documentation subnets 198.51.100.0/24, 203.0.113.0/24 (TEST-NET-2/3) and 127/8 stay allowed.
-//   - a URL whose scheme isn't https (or http on the local pages)
+//   - a URL whose scheme isn't https (or http on the local pages, or the example domains —
+//     payments.example.com is the shared-host name the self-hosting pages use)
 //   - a trailing slash on the example domain (the API's paths have none; a bare https://sandbox.example.com/
 //     in prose is fine)
 import { readFileSync, readdirSync, statSync } from 'node:fs';
@@ -43,7 +44,7 @@ export function problems(text, file) {
 		else if (PRIVATE_V4.test(url)) bad.push(`${url} is a private IPv4 address — use a documentation subnet or an example name`);
 		else if (/^https?:\/\/0\.0\.0\.0/.test(url)) bad.push(`${url}: 0.0.0.0 listens everywhere; it isn't an address to visit`);
 		else if (/[?&](token|key|secret|sig|password)=[A-Za-z0-9]/i.test(url)) bad.push(`${url} looks like it carries a credential`);
-		else if (/^http:\/\/(?!localhost|127\.|0\.0\.0\.0|\[?::1|dashboard\.localhost)/.test(url) && !/sandbox\.example\.com/.test(url)) bad.push(`${url} is plain http`);
+		else if (/^http:\/\/(?!localhost|127\.|0\.0\.0\.0|\[?::1|dashboard\.localhost)/.test(url) && !/sandbox\.example\.com/.test(url) && !/payments\.example\.com/.test(url)) bad.push(`${url} is plain http`);
 		else if (url.startsWith(`${EXAMPLE}/`) && !/^https:\/\/sandbox\.example\.com\/(healthz|readyz|v1)/.test(url))
 			bad.push(`${url}: the example domain only pretends to serve API paths, no other pages`);
 		else if (/^https:\/\/(pay|dashboard)\.sandbox\.example\.com\//.test(url) && !/^https:\/\/pay\.sandbox\.example\.com\/(c\/|api\/sessions\/|$)/.test(url) && !/^https:\/\/dashboard\.sandbox\.example\.com\/$/.test(url + '/'))
