@@ -1,0 +1,131 @@
+---
+title: Monitoring and troubleshooting
+description: /healthz versus /readyz, the reconciliation report as the real telemetry, the logs to watch, and the failure table — shown against this machine's stack.
+---
+
+Two routes front the whole operational surface, and they mean different things. Everything on
+this page runs against this machine's stack, so the addresses are loopback.
+
+## Liveness and readiness
+
+`GET /healthz` means the process answers — the check a load balancer's TCP probe wants:
+
+```sh run=ops
+curl -s http://127.0.0.1:56080/healthz | jq .
+```
+
+```json output=ops
+{
+  "simulated": true,
+  "status": "ok"
+}
+```
+
+`GET /readyz` means it *should take traffic* — it goes `503` with a `status` that isn't `ready`
+when a background task has stalled or the database is unreachable, and the body names the task.
+The signal to pull the node out of rotation, not to restart it:
+
+```sh run=ops
+curl -s http://127.0.0.1:56080/readyz | jq '{status, stale: [.tasks[] | select(.stale) | .name]}'
+```
+
+```json output=ops
+{
+  "status": "ready",
+  "stale": []
+}
+```
+
+Each task entry also carries `restarts`, `last_failure` and `since_beat_ms` — a `stale` task or
+a rising `restarts` is the readiness failure's name, before the first error reaches a client.
+
+## The report worth alerting on: reconciliation
+
+There is no metrics endpoint — the honest operational view is the reconciliation report, which
+sums the journal against the payments it produced. `GET /v1/reconciliation` reports what the
+periodic reconciler last verified; `?network=true` additionally reads the simulated network's
+operation list **now** and reports `unknown_to_server` / `unknown_to_network` / `disagreements`
+under `network` — a round trip per page of operations instead of the last tick's memory:
+
+```sh run=ops
+curl -s http://127.0.0.1:56080/v1/reconciliation \
+  -H "Authorization: Bearer $PS_API_KEY" | jq .
+```
+
+```json output=ops
+{
+  "clean": true,
+  "report": {
+    "account_mismatches": [],
+    "entries_checked": 3,
+    "imbalanced_currencies": [],
+    "open_operations": 0,
+    "operation_entry_mismatches": 0,
+    "payment_mismatches": [],
+    "payments_checked": 1
+  },
+  "simulated": true
+}
+```
+
+What to alert on: `open_operations` that never drains (each is a payment whose reply was lost —
+[concepts](/concepts/) calls them `uncertain`, and the server logs once one ages past
+`PS_RECONCILE_ALERT_AGE_MS`), and **any** `*_mismatches` entry — one means the journal and the
+payments disagree about a committed operation; that is a bug to keep, not noise to clear. The
+`network` side tells the same truth after a restore: operations the network settled while the
+database was behind appear as `unknown_to_server` until the reconciler resolves them — drift
+reported, never reconciled away silently.
+
+## The CLI's own check
+
+`sandbox-cli status` proves the API is a Payment Sandbox and shows your project and epoch — the
+fastest "is the whole path alive" probe an operator has:
+
+```sh run=ops
+cargo run -q -p sandbox-cli -- status
+```
+
+```text output=ops
+Payment Sandbox at http://127.0.0.1:56080 (ledger semantics v1)
+Project My store (my-store), dataset epoch 2
+```
+
+## Logs
+
+`PS_LOG_FORMAT` defaults to `json` — one event per line: timestamps, operation ids, error
+codes, route templates — and by design never keys, tokens or card-shaped data, so the log is
+safe to ship to your usual collector. `text` is the human alternative. The two services log
+separately:
+
+```sh not-run="runs as root on the deploy host"
+journalctl -u payment-sandbox-server -u payment-sandbox-sim --since "1 hour ago"
+```
+
+On this machine the same stream went to `server.log` — the last two warnings it holds now (a
+rejected card-shaped body from the payments examples, and the dataset reset's audit line):
+
+```sh run=ops
+grep -E '"message":"(request with card data rejected|dataset reset: a new epoch is open)"' server.log | tail -2
+```
+
+```text output=ops match=lines
+{"timestamp":"2026-11-20T02:19:57.525494Z","level":"WARN","fields":{"message":"request with card data rejected","code":"RawCardDataRejected"},"target":"sandbox_server::error","span":{"method":"POST","request_id":"01a1f6c0-ded4-7644-8cad-53934f4c2b18","route":"/v1/payments","name":"request"},"spans":[{"method":"POST","request_id":"01a1f6c0-ded4-7644-8cad-53934f4c2b18","route":"/v1/payments","name":"request"}]}
+{"timestamp":"2026-11-20T02:20:04.885845Z","level":"WARN","fields":{"message":"dataset reset: a new epoch is open","project_id":"01a1f6c0-b789-7193-8ef1-101c046bbd69","from":1,"to":2,"archived_payments":9},"target":"sandbox_server::handlers::projects","span":{"method":"POST","request_id":"01a1f6c0-fb90-70bb-8109-91963c139212","route":"/v1/project/reset","name":"request"},"spans":[{"method":"POST","request_id":"01a1f6c0-fb90-70bb-8109-91963c139212","route":"/v1/project/reset","name":"request"}]}
+```
+
+A restart is a clean cut: `TimeoutStopSec` plus `PS_SHUTDOWN_GRACE_MS` (10 s default) means
+SIGTERM lets in-flight work finish before exit. The cost operators see is the [deployment
+page's](/self-hosting/deployment/): in-memory dashboard sessions end and everyone signs back in.
+
+## When something's wrong
+
+| Symptom | First look | Usually |
+|---|---|---|
+| `readyz` says not ready | its reason field, then `journalctl -u payment-sandbox-server` | the database is unreachable, or a background task (reconciler, deliverer) missed its deadline — the process keeps answering `/healthz` on purpose |
+| a payment sits `uncertain` | `sandbox-cli payments get <id>`, then `reconcile --network` | the network's reply was lost; the reconciler settles it without charging twice — never retry an `uncertain` as if it failed |
+| webhooks stop arriving | `GET /v1/webhook_endpoints` — `consecutive_failures`, `dead` | the receiver is down or its port left `PS_WEBHOOK_PORTS`; dead endpoints stop being tried until re-enabled |
+| `403` on the dashboard | the browser's address bar vs `PS_DASHBOARD_ORIGIN` | Host/Origin must match the configured origin — a proxy that rewrites `Host` breaks the check by design |
+| everyone signed out at once | `uptime` on the server unit | sessions are in memory; a restart ends them all. Expected, not a breach |
+| `429` answers | the `Retry-After` header | the report budget or rate limit bit — back off the header's count, don't drop the operation key |
+| `refusing to run: the database's protections were weakened` | `journalctl`, then [backups](/self-hosting/backups/) | a trigger, grant or owner differs from the migrations' state — restore the migrations' state, never edit the journal by hand |
+| `stale_cursor` from an explanation link | [backups](/self-hosting/backups/) | the database was restored; cursors name rows in the old files and don't survive |

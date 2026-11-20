@@ -81,6 +81,16 @@ export default defineConfig({
 						{ label: 'The TypeScript SDK', slug: 'sdk' },
 					],
 				},
+				{
+					label: 'Self-hosting',
+					items: [
+						{ label: 'Configuration', slug: 'self-hosting/configuration' },
+						{ label: 'Deployment', slug: 'self-hosting/deployment' },
+						{ label: 'Backups and restore', slug: 'self-hosting/backups' },
+						{ label: 'Monitoring', slug: 'self-hosting/monitoring' },
+						{ label: 'The security model', slug: 'self-hosting/security' },
+					],
+				},
 				{ label: 'API reference', link: '/api/reference/', attrs: { 'data-reference': '' } },
 				{ label: 'Changelog', link: '/changelog/' },
 			],

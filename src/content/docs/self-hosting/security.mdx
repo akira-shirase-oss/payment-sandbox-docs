@@ -1,0 +1,131 @@
+---
+title: The security model
+description: What Payment Sandbox actually defends — loopback listeners, role separation, an immutable journal, hashed keys, sealed webhook secrets, allowlisted egress — and the honest list of what it does not do.
+---
+
+:::caution[Simulated money only]
+Payment Sandbox moves no real funds, accepts no real cards, has no real balances and talks to no
+bank. The security model below protects *your data* — keys, datasets, the journal — and keeps the
+simulation honest. It is not, and must never be presented as, a payment processor's security
+posture.
+:::
+
+The model in one sentence: **sandbox-only by construction** — the system is built so that running
+it correctly is the only easy way to run it, and every unsafe shortcut is a refusal you can see.
+Everything below runs against this machine's stack.
+
+## The boundaries
+
+**Everything listens on loopback; the proxy is the only public door.** `PS_LISTEN`, `PS_SIM_LISTEN`
+and the app listeners refuse a non-loopback bind at startup — a wider listen isn't warned about,
+it's refused ([configuration](/self-hosting/configuration/)). TLS terminates at the proxy; the
+server speaks plain HTTP on `127.0.0.1` and never sees the outside world
+([deployment](/self-hosting/deployment/)).
+
+**The runtime role can't touch what the schema owns.** Three PostgreSQL roles: `ps_owner`
+migrates, `ps_runtime` is the middle layer `setup` creates, `ps_app` serves traffic — no `UPDATE`
+or `DELETE` on the journal, its grants checked at startup. The owner's password lives only in
+`migrate.env`, and the migrate unit runs as a throwaway `DynamicUser` — a service user that can't
+read the file at all. At startup the server verifies the journal's protections — triggers enabled,
+function search paths pinned, owners and grants exact — and **refuses to serve a weakened
+database**; the [restore drill](/self-hosting/backups/) re-proves all of it on the copy.
+
+**Keys are hashed; webhook secrets are sealed.** `POST /v1/keys` shows a key once — the server
+stores its SHA-256. The same key, created then listed, carries its secret in the create answer
+and nowhere else:
+
+```sh run=ops
+curl -s -X POST http://127.0.0.1:56080/v1/keys \
+  -H "Authorization: Bearer $PS_API_KEY" -H 'Content-Type: application/json' \
+  -d '{"label": "rotation-check", "scopes": ["read"]}' | jq '{id: .api_key.id, secret}'
+curl -s http://127.0.0.1:56080/v1/keys \
+  -H "Authorization: Bearer $PS_API_KEY" | jq '.api_keys[0]'
+```
+
+```json output=ops
+{
+  "id": "01a1f6c9-5fdc-7679-9a86-a259ead3fbfc",
+  "secret": "sk_sim_…"
+}
+{
+  "created_at": "2026-11-20T02:29:14.843226Z",
+  "id": "01a1f6c9-5fdc-7679-9a86-a259ead3fbfc",
+  "label": "rotation-check",
+  "prefix": "sk_sim_…",
+  "revoked_at": null,
+  "scopes": [
+    "read"
+  ]
+}
+```
+
+`whsec_sim_…` signing secrets are encrypted at rest under `PS_SECRET_KEY` — which is why the env
+archive rides in every backup: lose it and every registered endpoint is undeliverable, with no
+recovery path by design.
+
+**Outbound calls go nowhere off the host.** Webhook delivery is the only egress, and it's
+allowlisted twice: `http://` loopback only, and only ports named in `PS_WEBHOOK_PORTS` — checked
+at registration *and* again after DNS resolution at delivery (a name that resolves to
+`127.0.0.1` doesn't launder itself in). Both refusals, on this machine:
+
+```sh run=ops
+curl -s -X POST http://127.0.0.1:56080/v1/webhook_endpoints \
+  -H "Authorization: Bearer $PS_API_KEY" -H 'Content-Type: application/json' \
+  -d '{"url": "https://example.com/webhooks"}' | jq .error.code
+```
+
+```json output=ops
+"invalid_body"
+```
+
+```sh run=ops
+curl -s -X POST http://127.0.0.1:56080/v1/webhook_endpoints \
+  -H "Authorization: Bearer $PS_API_KEY" -H 'Content-Type: application/json' \
+  -d '{"url": "http://127.0.0.1:56200/webhooks"}' | jq .error
+```
+
+```json output=ops
+{
+  "code": "invalid_body",
+  "message": "webhooks may not target the sandbox's own ports or PostgreSQL's, and other ports need PS_WEBHOOK_PORTS (or PS_PROFILE=dev)",
+  "request_id": "01a1f4c2-0000-7000-8000-000000000000"
+}
+```
+
+**Nothing card-shaped enters the system.** There are no card fields anywhere — not in the API,
+not in the checkout, not in the dashboard — and a body carrying one is rejected *before* JSON
+parsing, so a raw PAN can't end up logged or stored (`raw_card_data_rejected`; the
+[payments](/payments/) guide shows it). There are no production processor routes to point at:
+`sandbox-sim` is the only network the code knows how to call.
+
+**Everything is bounded and the bills come due.** Bodies, connections, pools, queues, retries and
+rate limits all have limits and deadlines ([configuration](/self-hosting/configuration/) has the
+knobs); `429`s carry `Retry-After` rather than collapsing under a burst. An over-limit request
+fails with a name, not a hang.
+
+## The honest "does not"
+
+- **Sessions live in memory.** A server restart signs every dashboard operator out. Acceptable
+  for a dev tool; it is not a managed identity system.
+- **The host is the boundary.** `root:root` `0600` env files, a service user, a locked-down unit —
+  and then the operating system is yours. A root compromise of the host is a compromise of the
+  sandbox: the keys are there, the journal is there. There is no HSM story; it's a dev tool.
+- **TLS, OS patching, backup custody and off-host copies are the operator's.** The backup script
+  writes a root-only directory on the same disk; it can't move it somewhere safer for you.
+- **At-least-once means duplicates.** Webhook delivery can repeat; idempotent receivers are the
+  contract, and the [webhooks](/webhooks/) guide is explicit about it. Exactly-once isn't
+  claimed because it can't be delivered.
+- **No tenant firewall between projects.** Projects isolate datasets and credentials; they share
+  the host, the database and the rate budgets. A hostile *operator* is out of scope — this is a
+  tool for teams, not a service for strangers.
+- **Keys and tokens never appear in logs** — operation ids and error codes do, which is the
+  deliberate trade.
+
+## The part the model can't do for you
+
+The guards refuse `sk_live`-shaped keys, non-`tok_sim_*` real-network tokens and card fields —
+but the *discipline* of a shared sandbox is still yours: treat `sk_sim_` keys as credentials
+(they open a whole project's dataset), rotate them, and keep `PS_BOOTSTRAP_TOKEN` and
+`PS_SECRET_KEY` out of anywhere a leak would surprise you. Simulated money still buys real
+attack surface — an open dashboard and a guessed key are a real foothold into your CI's test
+data.

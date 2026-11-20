@@ -1,0 +1,187 @@
+---
+title: Deployment
+description: One Linux host — PostgreSQL, the simulated network and the API on loopback behind a TLS proxy, systemd units doing the supervision, and the checks that prove the shape.
+---
+
+:::caution[Simulated money only]
+Payment Sandbox moves no real funds and accepts no real cards — no deployment changes that. It
+is a development and CI tool; this page is about running it as a shared sandbox for a team, not
+about putting a payment system on the internet.
+:::
+
+The deployed shape is one host: PostgreSQL, `sandbox-sim` (the simulated network) and
+`sandbox-server` (the API plus the checkout and dashboard apps) all listen on loopback, and a
+TLS-terminating proxy owns the three public names. `deploy/` in the repository ships the systemd
+units, the Caddyfile, the env-file examples and the backup script this page assembles.
+
+What you need first:
+
+- A Linux host with systemd.
+- PostgreSQL 18 — the deploy kit assumes it; `deploy/compose.yaml` pins the development image.
+- A proxy that terminates TLS (the kit's examples use Caddy) and three DNS names: the API, the
+  payer-facing checkout and the dashboard — `payments.example.com`, `pay.payments.example.com`
+  and `dashboard.payments.example.com` below.
+- Rust and Node matching `rust-toolchain.toml` and `package.json` for the release build — or build
+  artifacts from your own pipeline.
+
+## Install
+
+```sh not-run="runs as root on the deploy host"
+useradd --system --home /var/lib/payment-sandbox --shell /usr/sbin/nologin payment-sandbox
+cargo build --release -p sandbox-server -p sandbox-sim -p sandbox-cli
+npm ci && npm run build --workspace apps/checkout --workspace apps/dashboard
+install -m 0755 target/release/sandbox-{server,sim,cli} /opt/payment-sandbox/bin/
+install -d /etc/payment-sandbox
+install -m 0600 -o root -g root deploy/env/server.env.example /etc/payment-sandbox/server.env
+install -m 0600 -o root -g root deploy/env/sim.env.example /etc/payment-sandbox/sim.env
+install -m 0600 -o root -g root deploy/env/migrate.env.example /etc/payment-sandbox/migrate.env
+install -m 0600 -o root -g root deploy/env/backup.env.example /etc/payment-sandbox/backup.env
+install -m 0755 deploy/backup/payment-sandbox-backup /opt/payment-sandbox/bin/
+install -m 0644 deploy/systemd/payment-sandbox-*.service deploy/systemd/payment-sandbox-*.timer \
+  /etc/systemd/system/
+```
+
+Then edit the four env files — [configuration](/self-hosting/configuration/) is the reference —
+with real secrets (`openssl rand -hex 32`), the checkout/dashboard directories wherever you
+installed the built apps, and their public origins.
+
+## systemd
+
+```ini title="/etc/systemd/system/payment-sandbox-server.service" not-run="host configuration — deploy/systemd/ in the repository carries the complete unit (more hardening than shown)"
+[Unit]
+Description=Payment Sandbox server (simulated money only)
+After=network.target postgresql.service payment-sandbox-sim.service
+Wants=payment-sandbox-sim.service
+
+[Service]
+Type=simple
+User=payment-sandbox
+Group=payment-sandbox
+EnvironmentFile=/etc/payment-sandbox/server.env
+ExecStart=/opt/payment-sandbox/bin/sandbox-server serve
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=30
+LimitNOFILE=4096
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Three siblings do the rest: `payment-sandbox-sim.service` runs the network (its `StateDirectory`
+creates `/var/lib/payment-sandbox` for the store), `payment-sandbox-migrate.service` is a one-shot
+with `DynamicUser=yes` — migrations run as a throwaway user so the schema owner's password in
+`migrate.env` never reaches a process the server's user could inspect — and
+`payment-sandbox-backup.service` + `.timer` run the nightly dump ([backups](/self-hosting/backups/)).
+
+## First boot
+
+```sh not-run="runs as root on the deploy host"
+systemctl daemon-reload
+sudo -u postgres env PS_ADMIN_DATABASE_URL='postgres:///postgres?host=/var/run/postgresql&user=postgres' \
+  PS_OWNER_PASSWORD=your-owner-password PS_APP_PASSWORD=your-app-password \
+  /opt/payment-sandbox/bin/sandbox-server setup
+systemctl start payment-sandbox-migrate
+systemctl enable --now payment-sandbox-sim payment-sandbox-server payment-sandbox-backup.timer
+curl -fsS http://127.0.0.1:56080/readyz                          # answers on the host's loopback
+```
+
+`sandbox-server setup` runs once as the database administrator: on Debian or Ubuntu the
+`postgres` role has no password and signs in over the Unix socket as the OS user `postgres`
+(peer authentication), so the command runs as that user with a socket URL — keep `user=postgres`
+in it, and add `&port=5433` if the cluster isn't on 5432; a managed server takes
+`PS_ADMIN_DATABASE_URL=postgres://postgres:…@127.0.0.1:5432/postgres` instead. It creates
+`ps_owner`, `ps_runtime` and `ps_app`, the database (`PS_DATABASE_NAME`, default
+`payment_sandbox`), and the grants the journal protections depend on; the passwords it sets are
+the ones `migrate.env` and `server.env` hold. Running it again never resets an existing role's
+password — safe to re-run for a restore. `migrate` runs on install and on every upgrade; the
+server unit deliberately does not migrate — the runtime role doesn't own the schema.
+
+## The proxy
+
+```txt title="Caddyfile — three names, three loopback backends" not-run="your hostnames and TLS policy differ"
+payments.example.com {
+	reverse_proxy 127.0.0.1:56080
+}
+
+pay.payments.example.com {
+	reverse_proxy 127.0.0.1:56083
+}
+
+dashboard.payments.example.com {
+	reverse_proxy 127.0.0.1:56084
+}
+```
+
+The `Host` header passes through unchanged — the checkout and dashboard verify `Origin`/`Host`
+against their configured public origins, so the names in `server.env` must be the names in the
+proxy. Keep every `PS_*_LISTEN` on `127.0.0.1`: the proxy is the only thing that should reach the
+ports, and the server refuses a non-loopback bind anyway ([security](/self-hosting/security/)).
+
+## Reaching it from your own machines
+
+This is where the CLI's guards meet the deployment. `sandbox-cli` refuses a non-local API by
+default — the same binary, the same refusal on your workstation:
+
+```sh run=ops exit=2 stderr=1
+cargo run -q -p sandbox-cli -- --api-url https://payments.example.com status
+```
+
+```text output=ops
+SIMULATED MONEY ONLY: Payment Sandbox moves no real money and accepts no real cards.
+error: payments.example.com is not this machine: the sandbox runs on loopback (127.0.0.1, ::1, localhost). If it runs in a CI service container or on a shared host you control, allow it explicitly with --allow-non-local (or PS_ALLOW_NON_LOCAL=1)
+```
+
+And plain `http://` to that host is refused even when the host is allowed — a key in clear text
+is worse than no call:
+
+```sh run=ops exit=2 stderr=1
+cargo run -q -p sandbox-cli -- --api-url http://payments.example.com --allow-non-local status
+```
+
+```text output=ops
+SIMULATED MONEY ONLY: Payment Sandbox moves no real money and accepts no real cards.
+error: payments.example.com is not this machine, and http:// would send your sandbox key in clear text: use its https:// URL. Only on a private network you control (a CI service container) pass --allow-plain-http (or PS_ALLOW_PLAIN_HTTP=1) as well
+```
+
+Against the deployed host the working invocation is the explicit one:
+
+```sh not-run="reaches a remote host — run it only against a deployment you control"
+sandbox-cli --api-url https://payments.example.com --allow-non-local status
+```
+
+If the proxy serves a private CA's certificate instead of a public one, `--ca-cert team-ca.pem`
+(or `PS_CA_CERT`) adds it alongside the system's roots — there is no "skip verification" flag.
+
+## Upgrades and restarts
+
+The release sequence, every time:
+
+```sh not-run="runs as root on the deploy host"
+systemctl start payment-sandbox-backup                 # a restore point first
+systemctl stop payment-sandbox-server
+# install the new binaries and web builds
+systemctl start payment-sandbox-migrate                # idempotent; fails changing nothing if a migration can't apply
+systemctl restart payment-sandbox-sim
+systemctl start payment-sandbox-server
+curl -fsS http://127.0.0.1:56080/readyz
+sandbox-cli scenarios run --all --check                # every library scenario must still produce its committed trace
+```
+
+At startup the server checks its role and the journal's protections and **refuses to serve a
+weakened database** — a migration that changes protections is called out in the release notes.
+`scripts/release-smoke.sh` and `scripts/release-systemd.sh` in the repository automate the same
+sequence for the deploy host. Two honest costs:
+
+- **In-memory dashboard sessions end at restart.** Operators sign back in; nothing else is lost —
+  the API's state is the database and the network's store, not the process.
+- **There is one server.** During the restart window the API is simply down — the proxy answers
+  502s for seconds. A second live node isn't a valid shape: the journal's writer role, the
+  network's store and the checkpointed queue state are all single-writer. High availability here
+  is a fast, monitored restart plus real [backups](/self-hosting/backups/).

@@ -1,0 +1,147 @@
+---
+title: Configuration
+description: Every variable Payment Sandbox reads, grouped by the env file that carries it — what each service needs, what startup refuses, and how the secrets are generated.
+---
+
+Everything Payment Sandbox reads is an environment variable — there is no config file. On a
+deployed host the variables live in `/etc/payment-sandbox/` as four files, `root:root` mode
+`0600`: systemd reads each unit's `EnvironmentFile=` as root **before** dropping to the service
+user, so no service user can read any env file — the schema owner's password in `migrate.env`
+never reaches a process the server's user could inspect.
+
+| File | Read by | What it carries |
+|---|---|---|
+| `server.env` | `payment-sandbox-server.service` | listeners, the runtime database URL, the network's credential, the bootstrap token, the secret key |
+| `sim.env` | `payment-sandbox-sim.service` | the network's listen address, its own store, the same network credential |
+| `migrate.env` | `payment-sandbox-migrate.service`, `payment-sandbox-backup.service` | the schema owner's database URL — used only to migrate and to dump |
+| `backup.env` | `payment-sandbox-backup.service` (optional) | where backups go, how many to keep, the network's store path |
+
+`deploy/env/` in the repository ships each file annotated. This page is the reference;
+[deployment](/self-hosting/deployment/) puts them on a host. The examples here run against this
+machine's stack, so they show its loopback addresses.
+
+## server.env — the required set
+
+Startup refuses to run without every one of these, and names what is missing:
+
+| Variable | Example | What it sets |
+|---|---|---|
+| `PS_PROFILE` | `shared` | `dev` switches on the test control planes (the simulated network's faults and clocks, the dev store, every loopback webhook port). `shared` switches them all off — the right value anywhere other people reach the API |
+| `PS_LISTEN` | `127.0.0.1:56080` | the API's bind address. **Must be a loopback address** — the sandbox runs in the local/CI mode only; a wider bind is refused at startup, and a TLS proxy owns the public name |
+| `PS_DATABASE_URL` | `postgres://ps_app:…@127.0.0.1:5432/payment_sandbox` | the runtime connection, as the `ps_app` role — never the schema owner, never a superuser |
+| `PS_SIM_URL` | `http://127.0.0.1:56081` | where the simulated network listens — loopback only, refused otherwise |
+| `PS_SIM_TOKEN` | — | the credential the server presents to the network; the same value as `sim.env`'s. ≥ 32 characters |
+| `PS_BOOTSTRAP_TOKEN` | — | creates projects and their first keys (`POST /v1/projects`). ≥ 32 characters |
+| `PS_SECRET_KEY` | — | seals webhook signing secrets at rest. ≥ 32 characters; **its loss makes registered endpoints undeliverable**, so it belongs in the env-file backup |
+| `PS_WEBHOOK_PORTS` | `56100-56199` | the only loopback ports a webhook may target — a comma list or a range, plus the sandbox's own ports always refused. In `dev` profile every loopback port is allowed |
+
+## server.env — the apps and the bounds
+
+Checkout and dashboard are static apps the server itself serves on separate origins — sessions
+are browser-side and never reach the database:
+
+| Variable | Example | What it sets |
+|---|---|---|
+| `PS_CHECKOUT_DIR` / `PS_CHECKOUT_LISTEN` / `PS_CHECKOUT_ORIGIN` | `apps/checkout/build`, `127.0.0.1:56083`, `https://pay.payments.example.com` | the built checkout assets, its listener, and the public origin the payer's browser is sent to |
+| `PS_DASHBOARD_DIR` / `PS_DASHBOARD_LISTEN` / `PS_DASHBOARD_ORIGIN` | `apps/dashboard/build`, `127.0.0.1:56084`, `https://dashboard.payments.example.com` | the same triple for the operator's dashboard |
+
+Everything else has a default that bounds it — the names below are the ones worth knowing before
+you need them, not a list to tune up front:
+
+| Group | Variables | Bound |
+|---|---|---|
+| The HTTP edge | `PS_MAX_BODY_BYTES`, `PS_MAX_CONNECTIONS`, `PS_MAX_CONNECTION_AGE_MS`, `PS_MAX_REQUESTS_PER_CONNECTION`, `PS_READ_TIMEOUT_MS`, `PS_WRITE_TIMEOUT_MS`, `PS_REQUEST_TIMEOUT_MS`, `PS_READINESS_TIMEOUT_MS`, `PS_SHUTDOWN_GRACE_MS` | request size, connection count and age, per-phase deadlines, drain time on SIGTERM |
+| The database pool | `PS_DB_MAX_CONNECTIONS`, `PS_DB_ACQUIRE_TIMEOUT_MS`, `PS_DB_STATEMENT_TIMEOUT_MS`, `PS_DB_LOCK_TIMEOUT_MS` | pool size and how long a request may wait on the database before it fails instead of queueing forever |
+| The network call | `PS_SIM_TIMEOUT_MS`, `PS_MAX_IN_FLIGHT`, `PS_PAYMENT_QUEUE_WAIT_MS` | how long a payment may wait on the network — shorter than the network's own holds, so a lost reply surfaces `uncertain` rather than hanging |
+| The reconciler | `PS_RECONCILE_INTERVAL_MS`, `PS_RECONCILE_GRACE_MS`, `PS_RECONCILE_BATCH`, `PS_RECONCILE_CONCURRENCY`, `PS_RECONCILE_PER_PROJECT`, `PS_RECONCILE_BACKOFF_MAX_MS`, `PS_RECONCILE_NETWORK_MAX_PAGES`, `PS_RECONCILE_ALERT_AGE_MS` | how often the network is read back, how young an `uncertain` must be before it is touched, batch and fan-out limits, and the age past which an unresolved `uncertain` alerts |
+| The reporter | `PS_REPORT_CONCURRENCY`, `PS_REPORT_PER_PROJECT`, `PS_REPORT_BURST`, `PS_REPORT_REFILL_PER_MINUTE` | the token-bucket on report generation, per project and global |
+| The deliverer | `PS_DELIVERY_POLL_MS` | how often due webhook deliveries are claimed |
+| Logs | `PS_LOG`, `PS_LOG_FORMAT` | level (`info`) and `text` or `json` — the deployed default is `json` |
+
+## sim.env — the simulated network
+
+```ini title="/etc/payment-sandbox/sim.env" not-run="a host file — deploy/env/sim.env.example in the repository is this file, annotated"
+PS_PROFILE=shared
+PS_SIM_LISTEN=127.0.0.1:56081
+PS_SIM_DB=/var/lib/payment-sandbox/sim.redb
+PS_SIM_TOKEN=
+PS_SIM_LOG=info
+```
+
+`PS_SIM_DB` is the network's own store — it is backed up with the database, and a restore needs
+both (see [backups](/self-hosting/backups/)). `PS_SIM_TOKEN` is the same value as `server.env`'s.
+
+## migrate.env and backup.env
+
+```ini title="/etc/payment-sandbox/migrate.env" not-run="a host file — deploy/env/migrate.env.example in the repository is this file, annotated"
+PS_MIGRATE_DATABASE_URL=postgres://ps_owner:CHANGE-ME@127.0.0.1:56085/payment_sandbox
+```
+
+```ini title="/etc/payment-sandbox/backup.env" not-run="a host file — every line is optional; these are the defaults"
+PS_BACKUP_DIR=/var/backups/payment-sandbox
+PS_BACKUP_KEEP=14
+PS_SIM_DB=/var/lib/payment-sandbox/sim.redb
+```
+
+The roles in the URLs are deliberate: `ps_owner` owns the schema and only ever migrates or dumps;
+`ps_app` serves traffic and cannot `UPDATE` or `DELETE` the journal. The passwords differ, and
+only `migrate.env` may hold the owner's.
+
+## Generating the secrets
+
+Every token is random bytes — `openssl` makes them, and the validation floor is 32 characters:
+
+```sh run=ops
+openssl rand -hex 32
+```
+
+```text output=ops
+<hex64>
+```
+
+Keep `PS_BOOTSTRAP_TOKEN` out of shell history the same way `sandbox-cli` keeps `--key` out of
+it: write it into the env file with an editor, not a command line.
+
+## This machine's values
+
+The development stack prints its own equivalents — public development credentials, not secrets —
+with `scripts/stack.sh env`:
+
+```sh run=ops
+scripts/stack.sh env
+```
+
+```text output=ops
+export PS_ADMIN_DATABASE_URL=postgres://sandbox:sandbox-dev@127.0.0.1:56432/sandbox
+export PS_MIGRATE_DATABASE_URL=postgres://ps_owner:ps-owner-dev@127.0.0.1:56432/payment_sandbox
+export PS_DATABASE_URL=postgres://ps_app:ps-app-dev@127.0.0.1:56432/payment_sandbox
+export PS_TEST_DATABASE_URL=postgres://sandbox:sandbox-dev@127.0.0.1:56432/sandbox
+export PS_TEST_RESTORE_DATABASE_URL=postgres://sandbox:sandbox-dev@127.0.0.1:56450/sandbox
+export PS_PG_RESTORE_CONTAINER=payment-sandbox-postgres-restore-1
+export PS_PROFILE=dev
+export PS_SIM_TOKEN=sim-dev-network-credential-not-a-secret
+export PS_SIM_CONTROL_TOKEN=sim-dev-control-credential-not-a-secret
+export PS_STORE_CONTROL_TOKEN=store-dev-control-credential-not-a-secret
+```
+
+`dev` profile is the give-away that this is the local stack: a deployment runs `shared`.
+
+## What startup refuses
+
+Config loading is fail-fast and cumulative — one startup error names every problem at once.
+Removing two required values from this machine's environment shows the shape:
+
+```sh run=ops exit=1 stderr=1
+env -u PS_DATABASE_URL -u PS_SIM_TOKEN ./target/debug/sandbox-server serve
+```
+
+```text output=ops
+Error: loading configuration
+
+Caused by:
+    invalid configuration: PS_DATABASE_URL is required; PS_SIM_TOKEN is required
+```
+
+The same check refuses a `PS_LISTEN` that isn't loopback, a `PS_SIM_URL` that isn't, secrets
+under 32 characters, and a `PS_WEBHOOK_PORTS` that doesn't parse — the process exits rather than
+serving a configuration it can't defend.

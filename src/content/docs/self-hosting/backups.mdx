@@ -1,0 +1,128 @@
+---
+title: Backups and the restore drill
+description: What the nightly timer actually copies, the honest limits of each artifact, and the rehearsal that proves a restore is a ledger — not just a pile of files.
+---
+
+:::caution[Simulated money only]
+Payment Sandbox moves no real funds and accepts no real cards. Backups still matter here: the
+ledger your tests built is real work, and a restore you have never rehearsed is a hope, not a
+backup.
+:::
+
+{/* snippet ops: snippets/ops-cd.sh */}
+
+Two stores matter, and they fail separately: the PostgreSQL database (the authoritative journal,
+operations, keys, endpoints) and the network's own `PS_SIM_DB` store. `payment-sandbox-backup.timer`
+copies both every night at about 03:17 plus a jitter — a run missed while the host was off happens
+at the next boot — into `/var/backups/payment-sandbox`, a root-only `0700` directory:
+
+- `db-<stamp>.dump` — a live `pg_dump --format=custom` as the schema owner (its URL is
+  `migrate.env`'s). One consistent snapshot; the server keeps serving. Every dump is read back
+  with `pg_restore --list` before the run finishes.
+- `sim-<stamp>.redb` — the network's store, copied **while the network is stopped** for the copy
+  (well under a second for a small store; a payment sent in that window comes back `uncertain`
+  and the reconciler settles it — uncertainty handled, not hidden).
+- `etc-<stamp>.tar` — `/etc/payment-sandbox`, **secrets included**: `PS_SECRET_KEY` opens the
+  stored webhook signing secrets and the bootstrap token creates projects, so the env archive is
+  as sensitive as the dump and belongs with it.
+
+`PS_BACKUP_KEEP` (14) of each kind is retained; `PS_BACKUP_DIR` moves the lot. The unit runs as
+root — the only thing on the host that does — because it reads `migrate.env` and
+`/etc/payment-sandbox`:
+
+```ini title="the nightly pair" not-run="host configuration — deploy/systemd/ carries both units"
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/payment-sandbox/migrate.env
+EnvironmentFile=-/etc/payment-sandbox/backup.env
+ExecStart=/opt/payment-sandbox/bin/payment-sandbox-backup
+
+[Timer]
+OnCalendar=*-*-* 03:17:00
+RandomizedDelaySec=15min
+Persistent=true
+```
+
+```sh not-run="runs as root on the deploy host"
+systemctl start payment-sandbox-backup          # one now, without waiting for 03:17
+journalctl -u payment-sandbox-backup            # each run, its artifacts and sizes
+```
+
+**Then copy the directory off the host** — rsync, restic, your backup system. A backup that dies
+with the disk it copied is not a backup, and neither is one whose secrets stayed behind: without
+`PS_SECRET_KEY` the restored webhook endpoints can't be unsealed, and without the env files the
+restored host can't prove it is itself.
+
+## The restore
+
+Into a fresh database created the way `setup` creates one — it keeps the role passwords — then
+the store from the same stamp, then let the server check everything:
+
+```sh not-run="runs as root on the deploy host"
+b=/var/backups/payment-sandbox; stamp=20261117T031700Z        # the backup to restore
+systemctl stop payment-sandbox-server
+sudo -u postgres env PS_ADMIN_DATABASE_URL='postgres:///postgres?host=/var/run/postgresql&user=postgres' \
+  PS_DATABASE_NAME=payment_sandbox_restored /opt/payment-sandbox/bin/sandbox-server setup
+pg_restore --single-transaction --exit-on-error --no-owner --role=ps_owner \
+  --dbname="postgres://ps_owner:…@127.0.0.1:5432/payment_sandbox_restored" "$b/db-$stamp.dump"
+# point PS_DATABASE_URL (server.env) and PS_MIGRATE_DATABASE_URL (migrate.env) at
+# payment_sandbox_restored, then put the network's store back:
+systemctl stop payment-sandbox-sim
+install -o payment-sandbox -g payment-sandbox -m 0600 "$b/sim-$stamp.redb" /var/lib/payment-sandbox/sim.redb
+systemctl start payment-sandbox-sim payment-sandbox-migrate payment-sandbox-server
+curl -fsS http://127.0.0.1:56080/readyz
+sandbox-cli reconcile --network                              # clean: the two agree
+```
+
+The startup checks do real work here: the server refuses a database whose protections were
+weakened, and `reconcile --network` reads the network's side back — a database restored from
+last night against a store from this morning shows the drift honestly as `uncertain`s settle,
+not as silent divergence ([concepts](/concepts/) has the model).
+
+## The drill: prove it, don't trust it
+
+`scripts/restore-rehearsal.sh` is the same exercise as a test: `pg_dump` the source, restore
+into a new database in one transaction, then compare a fingerprint — every table's row count, a
+digest of every journal entry and line, every enabled trigger and its function, every function's
+pinned `search_path`, every object's owner, the runtime role's exact grants, every sequence's
+position. Then it checks the protections themselves on both sides — so a weakened *source* fails
+even though its copy equals it — proves the runtime role's `UPDATE`/`DELETE` on the journal are
+refused on the copy, and verifies the ledger invariants: every entry balanced per currency, no
+entry without lines.
+
+The source must be quiescent: the dump is a consistent snapshot, but the fingerprint is taken
+after the restore — a write in between fails the comparison on purpose. `pg_dump`, `pg_restore`
+and `psql` run inside the compose PostgreSQL containers as their superuser, so their versions
+always match the server's:
+
+```sh run=ops step=restore
+scripts/restore-rehearsal.sh payment_sandbox payment_sandbox_restored
+```
+
+Across clusters — the local stack ships a second, restore-only cluster on `127.0.0.1:56450` for
+exactly this — `setup` creates the roles there first (the copy's database is the rehearsal's own
+work), then `PS_PG_TARGET_CONTAINER` sends the restore to it:
+
+```sh run=ops step=restore
+env PS_ADMIN_DATABASE_URL="$PS_TEST_RESTORE_DATABASE_URL" ./target/debug/sandbox-server setup
+env PS_PG_TARGET_CONTAINER="$PS_PG_RESTORE_CONTAINER" \
+  scripts/restore-rehearsal.sh payment_sandbox payment_sandbox_xcluster
+```
+
+Two after-effects to expect, both honest:
+
+- **The copy is a new database, not a new timeline.** Sequences, ids and the journal carry over;
+  nothing renumbers itself to look cleaner.
+- **`explain` cursors die at a restore.** `GET /v1/ledger_explanations/{cursor}` answers
+  `stale_cursor` against the restored database — cursors name rows in the old database's files
+  and don't survive `pg_restore`. [Monitoring](/self-hosting/monitoring/) has the rest of the
+  table.
+
+## Practice
+
+- **Back up before every upgrade** — the release sequence on the
+  [deployment](/self-hosting/deployment/) page starts there for a reason.
+- **Rehearse on the spare cluster, then delete the copy.** The drill above is cheap precisely
+  because `payment_sandbox_restored` is disposable.
+- **Keep the old database until the restored one proves itself** — restored *beside* it, never
+  instead of it. `DROP` is forever.
